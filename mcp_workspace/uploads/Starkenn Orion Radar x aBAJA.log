@@ -1,0 +1,29 @@
+Conversion Warnings Log
+
+
+MSG_ID: 1817 	MSG_TYPE: S 	MSG_NAME: Tracked_object_10
+	SIG_NAME: Tracked_obj_10_Y_distance, STATUS: Invalid Max or Min value., ACTION: Value Set to default
+
+MSG_ID: 1816 	MSG_TYPE: S 	MSG_NAME: Tracked_object_9
+	SIG_NAME: Tracked_obj_9_Y_distance, STATUS: Invalid Max or Min value., ACTION: Value Set to default
+
+MSG_ID: 1815 	MSG_TYPE: S 	MSG_NAME: Tracked_object_8
+	SIG_NAME: Tracked_obj_8_Y_distance, STATUS: Invalid Max or Min value., ACTION: Value Set to default
+
+MSG_ID: 1814 	MSG_TYPE: S 	MSG_NAME: Tracked_object_7
+	SIG_NAME: Tracked_obj_7_Y_distance, STATUS: Invalid Max or Min value., ACTION: Value Set to default
+
+MSG_ID: 1813 	MSG_TYPE: S 	MSG_NAME: Tracked_object_6
+	SIG_NAME: Tracked_obj_6_Y_distance, STATUS: Invalid Max or Min value., ACTION: Value Set to default
+
+MSG_ID: 1812 	MSG_TYPE: S 	MSG_NAME: Tracked_object_5
+	SIG_NAME: Tracked_obj_5_Y_distance, STATUS: Invalid Max or Min value., ACTION: Value Set to default
+
+MSG_ID: 1811 	MSG_TYPE: S 	MSG_NAME: Tracked_object_4
+	SIG_NAME: Tracked_obj_4_Y_distance, STATUS: Invalid Max or Min value., ACTION: Value Set to default
+
+MSG_ID: 1810 	MSG_TYPE: S 	MSG_NAME: Tracked_object_3
+	SIG_NAME: Tracked_obj_3_Y_distance, STATUS: Invalid Max or Min value., ACTION: Value Set to default
+
+MSG_ID: 1809 	MSG_TYPE: S 	MSG_NAME: Tracked_object_2
+	SIG_NAME: Tracked_obj_2_Y_distance, STATUS: Invalid Max or Min value., ACTION: Value Set to default
