@@ -17,6 +17,8 @@ const App = () => {
   const [puterReady, setPuterReady] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef(null);
+  const [metrics, setMetrics] = useState([]);
+
 
   
 
@@ -254,8 +256,23 @@ const handleFileUpload = async (file) => {
     </pre>
   );
 };
+
+const startRequest = () => ({
+  id: crypto.randomUUID(),
+  startTime: performance.now(),
+  endTime: null,
+  success: false
+});
+
+  const finishRequest = (req, success) => ({
+    ...req,
+    endTime: performance.now(),
+    success
+  });
+
   const handleSubmit = async (e) => {
-  e.preventDefault();
+    const req = startRequest();
+    e.preventDefault();
 
   if (!user) {
     setMessages(prev => [...prev, {
@@ -353,8 +370,20 @@ Respond to the user in a clear, helpful, conversational way.
       timestamp: new Date()
     }]);
 
+    setMetrics(prev => [
+  ...prev,
+  finishRequest(req, true)
+]);
+
+
   } catch (err) {
     console.error("HANDLE SUBMIT ERROR:", err);
+
+    setMetrics(prev => [
+  ...prev,
+  finishRequest(req, false)
+]);
+
   } finally {
     setIsProcessing(false);
   }
@@ -386,11 +415,30 @@ Respond to the user in a clear, helpful, conversational way.
   };
 
   // Performance metrics data
-  const performanceData = {
-    responseTimes: [120, 95, 150, 80, 110, 130],
-    successRate: 98.5,
-    activeConnections: 4
+  const performanceData = React.useMemo(() => {
+  if (!metrics.length) {
+    return {
+      responseTimes: [],
+      successRate: 0,
+      activeConnections: mcServers.filter(s => s.status === "online").length
+    };
+  }
+
+  const responseTimes = metrics.map(m =>
+    Math.round(m.endTime - m.startTime)
+  );
+
+  const successRate = (
+    (metrics.filter(m => m.success).length / metrics.length) * 100
+  ).toFixed(1);
+
+  return {
+    responseTimes,
+    successRate,
+    activeConnections: mcServers.filter(s => s.status === "online").length
   };
+}, [metrics, mcServers]);
+
 
   const getMessageStyles = (type) => {
     const baseStyles = "rounded-2xl px-4 py-3 max-w-[80%]";
@@ -659,44 +707,137 @@ Respond to the user in a clear, helpful, conversational way.
         </div>
         
         {/* Performance Metrics */}
-        <div className="p-6 border-b border-gray-700">
-          <h3 className="font-semibold mb-4">Performance</h3>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="bg-gray-750 p-4 rounded-xl border border-gray-600 text-center">
-              <div className="text-2xl font-bold text-green-400">{performanceData.successRate}%</div>
-              <div className="text-gray-400 text-sm mt-1">Success Rate</div>
-            </div>
-            <div className="bg-gray-750 p-4 rounded-xl border border-gray-600 text-center">
-              <div className="text-2xl font-bold text-blue-400">
-                {Math.round(performanceData.responseTimes.reduce((a, b) => a + b) / performanceData.responseTimes.length)}ms
-              </div>
-              <div className="text-gray-400 text-sm mt-1">Avg Response</div>
+<div className="p-6 border-b border-gray-700">
+  <h3 className="font-semibold mb-4">Performance</h3>
+
+  <div className="grid grid-cols-2 gap-3">
+    {/* Success Rate */}
+    <div className="bg-gray-750 p-4 rounded-xl border border-gray-600 text-center">
+      <div className="text-2xl font-bold text-green-400">
+        {performanceData.successRate}%
+      </div>
+      <div className="text-gray-400 text-sm mt-1">Success Rate</div>
+    </div>
+
+    {/* Avg Response */}
+    <div className="bg-gray-750 p-4 rounded-xl border border-gray-600 text-center">
+      <div className="text-2xl font-bold text-blue-400">
+        {performanceData.responseTimes.length
+          ? Math.round(
+              performanceData.responseTimes.reduce((a, b) => a + b, 0) /
+              performanceData.responseTimes.length
+            )
+          : 0}ms
+      </div>
+      <div className="text-gray-400 text-sm mt-1">Avg Response</div>
+    </div>
+  </div>
+</div>
+
+{/* Response Time Chart */}
+<div className="p-6 border-b border-gray-700">
+  <h3 className="font-semibold mb-4">Response Time Variance</h3>
+  
+  <div className="flex items-end space-x-1 h-48">
+    {performanceData.responseTimes.map((time, index) => {
+      const maxTime = Math.max(...performanceData.responseTimes);
+      const minTime = Math.min(...performanceData.responseTimes);
+      const previousTime = index > 0 ? performanceData.responseTimes[index - 1] : time;
+      const difference = time - previousTime;
+      const variance = Math.abs(difference) / (maxTime - minTime || 1);
+      
+      return (
+        <div key={index} className="flex flex-col items-center flex-1">
+          {/* Variance indicator */}
+          <div className="relative w-full mb-2">
+            <div className="flex justify-center items-center h-6">
+              {difference !== 0 && (
+                <div className={`text-xs px-2 py-1 rounded-full ${
+                  difference > 0 
+                    ? 'bg-red-500/20 text-red-400' 
+                    : 'bg-green-500/20 text-green-400'
+                }`}>
+                  {difference > 0 ? `+${difference}` : difference}ms
+                </div>
+              )}
             </div>
           </div>
-        </div>
-
-        {/* Response Time Chart */}
-        <div className="p-6 border-b border-gray-700">
-          <h3 className="font-semibold mb-4">Response Times</h3>
-          <div className="flex items-end justify-between h-32 space-x-2">
-            {performanceData.responseTimes.map((time, index) => (
-              <div key={index} className="flex flex-col items-center flex-1">
-                <div className="w-full bg-gray-700 rounded-t-lg relative group" style={{ height: '100px' }}>
-                  <div
-                    className="bg-gradient-to-t from-blue-500 to-green-500 rounded-t-lg w-full transition-all duration-300"
-                    style={{ height: `${(time / 200) * 100}%` }}
-                  >
-                    <div className="absolute -top-8 left-1/2 transform -translate-x-1/2 bg-gray-800 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity duration-200 whitespace-nowrap">
-                      {time}ms
+          
+          {/* Main bar */}
+          <div className="relative w-full group">
+            <div className="w-full bg-gradient-to-t from-gray-800 to-gray-900 rounded-t-lg h-32 flex flex-col justify-end">
+              {/* Actual value bar */}
+              <div
+                className={`rounded-t-lg w-full transition-all duration-500 ${
+                  time <= 100 ? 'bg-gradient-to-t from-green-400 to-emerald-600' :
+                  time <= 150 ? 'bg-gradient-to-t from-yellow-400 to-amber-600' :
+                  'bg-gradient-to-t from-red-400 to-rose-600'
+                }`}
+                style={{ 
+                  height: `${((time - minTime) / (maxTime - minTime || 1)) * 90}%`,
+                  boxShadow: `0 0 20px ${
+                    time <= 100 ? 'rgba(34, 197, 94, 0.3)' :
+                    time <= 150 ? 'rgba(234, 179, 8, 0.3)' :
+                    'rgba(239, 68, 68, 0.3)'
+                  }`
+                }}
+              >
+                {/* Animated pulse for high values */}
+                {time > 150 && (
+                  <div className="absolute inset-0 rounded-t-lg bg-red-400 animate-pulse opacity-20"></div>
+                )}
+              </div>
+              
+              {/* Comparison line */}
+              {index > 0 && (
+                <div
+                  className="absolute left-0 right-0 h-0.5 bg-white/30"
+                  style={{
+                    bottom: `${((previousTime - minTime) / (maxTime - minTime || 1)) * 90}%`
+                  }}
+                ></div>
+              )}
+            </div>
+            
+            {/* Enhanced tooltip */}
+            <div className="absolute -top-24 left-1/2 -translate-x-1/2 bg-gray-900 border border-gray-700 rounded-xl p-3 opacity-0 group-hover:opacity-100 transition-all z-50 shadow-2xl min-w-[160px]">
+              <div className="text-center">
+                <div className="text-2xl font-bold text-white mb-1">{time}ms</div>
+                <div className="text-xs text-gray-400 mb-2">Request {index + 1}</div>
+                
+                {index > 0 && (
+                  <div className="flex items-center justify-center space-x-2 mb-2">
+                    <div className={`text-xs ${
+                      difference > 0 ? 'text-red-400' : 'text-green-400'
+                    }`}>
+                      {difference > 0 ? '↑' : '↓'} {Math.abs(difference)}ms
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      from Req {index}
                     </div>
                   </div>
+                )}
+                
+                <div className="text-xs text-gray-400">
+                  {time <= 100 ? 'Performance: Excellent' : 
+                   time <= 150 ? 'Performance: Good' : 
+                   'Performance: Needs Attention'}
                 </div>
-                <div className="text-gray-400 text-xs mt-2">Req {index + 1}</div>
               </div>
-            ))}
+              <div className="absolute bottom-0 left-1/2 w-3 h-3 bg-gray-900 border-b border-r border-gray-700 -translate-x-1/2 translate-y-1/2 rotate-45"></div>
+            </div>
+          </div>
+          
+          {/* X-axis */}
+          <div className="mt-2 text-center">
+            <div className="text-gray-300 text-sm font-semibold">#{index + 1}</div>
+            <div className="text-gray-500 text-xs">{time}ms</div>
           </div>
         </div>
-
+      );
+    })}
+  </div>
+</div>
         {/* System Status */}
         <div className="p-6">
           <h3 className="font-semibold mb-4">System Status</h3>
@@ -727,4 +868,4 @@ Respond to the user in a clear, helpful, conversational way.
   );
 };
 
-export default App;
+export default App; 
