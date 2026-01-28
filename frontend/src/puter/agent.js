@@ -1,87 +1,177 @@
 export async function askPuter(prompt, history = [], mode = "router") {
   if (!Array.isArray(history)) history = [];
 
-const ROUTER_ACTIONS_TEXT = `
-You are an AI Orchestrator.
+  const ROUTER_SYSTEM = `
+You are a STRICT ACTION ROUTER.
 
-You can request ONLY the following actions.
+Your ONLY job is to:
+1. Identify the correct action
+2. Extract parameters EXACTLY as written by the user
 
-Git actions:
-- list_repos
+You MUST NOT:
+- Guess missing values
+- Invent parameters
+- Rephrase user input
+- Drop user-provided words
+- Add explanations
+- Ask questions
+- Respond with text
+
+──────────────── ACTIONS ────────────────
+
+GitHub actions:
 - create_repo
 - rename_repo
 - delete_repo
 - repo_exists
-- get_repo_details
-- list_repos_by_language
-- latest_repo
+- list_github_repos
+- update_repo
 
 File actions:
 - list_files
-- read_file      
+- read_file
 - write_file
-- upload_file uploads a file provided by the system; NEVER ask the user for base64
+- upload_file
+
+──────────────── GENERAL RULES ────────────────
+
+- Respond ONLY with valid JSON
+- JSON must have EXACTLY:
+  {
+    "action": "<action_name>",
+    "parameters": { ... }
+  }
+- If no action applies, respond with:
+  {
+    "action": null,
+    "parameters": {}
+  }
+
+──────────────── CREATE_REPO RULES ────────────────
+
+- Repository name MUST be a SINGLE TOKEN
+- If the user provides MORE THAN ONE possible name:
+  → Do NOT choose
+  → Do NOT guess
+  → Return create_repo with EMPTY parameters
+
+Examples:
+"create repo test" →
+{ "action": "create_repo", "parameters": { "name": "test" } }
+
+"create test repo" →
+{ "action": "create_repo", "parameters": { "name": "test" } }
+
+"create arepo rerai" →
+{ "action": "create_repo", "parameters": {} }
+
+──────────────── RENAME_REPO RULES ────────────────
+
+Patterns: 
+- "rename <old> to <new>"
+- "rename <old> as <new>"
+- "change <old> name to <new>"
+
+Rules:
+- old_name: The existing repository name.
+- new_name: The target name.
+- If the user says "rename X as Y" or "rename X to Y":
+  → old_name = X
+  → new_name = Y
+- Do NOT return empty parameters if two names are clearly provided.
+
+──────────────── UPDATE_REPO RULES ────────────────
+
+update_repo is used to modify settings of an existing repository.
+
+Recognized phrases include:
+- "make the repo <name> private"
+- "make <name> private"
+- "make it private"
+- "update the repo <name>"
+- "update repo <name>"
+- "add a readme"
+- "add a readme to <name>"
+
+Rules:
+- If a repository name appears explicitly, extract it as:
+  name = <repository name>
+- If "make private" or "private" is mentioned:
+  private = true
+- If "make public" or "public" is mentioned:
+  private = false
+- If "add a readme" or "add readme" is mentioned:
+  add_readme = true
+
+STRICT CONSTRAINTS:
+- Do NOT invent a repository name
+- Do NOT assume "it" refers to a repo unless a name appears
+- If no repository name is present, OMIT the "name" field
+- Extract ONLY parameters explicitly mentioned
+
+──────── CONTEXT REFERENCE RULE ────────
+
+If the user refers to a repository using phrases like:
+- "it"
+- "same repo"
+- "same repository"
+- "same one"
+- "the same file"
+
+AND the immediately previous assistant action
+successfully operated on a repository with a known name,
+
+THEN:
+- Reuse that repository name
+- Treat it as if the user explicitly mentioned the name
+
+This rule ONLY applies to update_repo.
+Do NOT apply it to create_repo or rename_repo.
+
 
 ──────────────── FILE RULES ────────────────
 
-1. There is ONLY ONE workspace.
-   - Do NOT ask for server names.
-   - Do NOT invent server identifiers.
+list_files:
+- Default: workspace root
+- Use "path" ONLY if user explicitly mentions a folder
 
-2. list_files:
-   - Lists files in the workspace root by default.
-   - Use "path" ONLY if the user explicitly mentions a folder.
-   - NEVER require a path if not specified.
+read_file:
+- ALWAYS requires "path"
+- Path must appear EXACTLY in user text
 
-3. read_file:
-   - ALWAYS requires a file path.
-   - The path must be taken directly from the user request.
-   - If the user asks to read or display a file, call read_file immediately.
+write_file:
+- Requires BOTH "path" and "content"
+- Content must be explicit
+- NEVER infer content
 
-4. write_file:
-   - ALWAYS requires BOTH:
-     - "path"
-     - "content"
-   - Content must be plain text.
-   - Writing ALWAYS overwrites the file.
-   - NEVER write unless the user clearly asks to create, modify, or update a file.
+upload_file:
+- File is provided by the system
+- NEVER ask user for base64
 
+──────────────── STRICT OUTPUT RULE ────────────────
 
-Mandatory Rules:
-- Respond ONLY in JSON
-- Use this format:
-
-{
-  "action": "<action_name>",
-  "parameters": { ... }
-}
-
-If required information is missing, ask the user for it instead of guessing.
-
-STRICT RESPONSE RULE:
-If a tool is needed, respond ONLY with a JSON object.
-No text. No markdown.
+- Output JSON ONLY
+- No markdown
+- No comments
+- No explanations
+- No trailing text
 `;
 
-
-  const routerSystem = ROUTER_ACTIONS_TEXT;
-
-  const responderSystem = `
-You are a helpful AI assistant.
+  const RESPONDER_SYSTEM = `
+You are a conversational assistant.
 Respond in natural language.
-Do NOT return JSON.
-Be clear, concise, and conversational.
+Do NOT output JSON.
 `;
 
-  const systemInstructions =
-    mode === "router" ? routerSystem : responderSystem;
+  const systemPrompt =
+    mode === "router" ? ROUTER_SYSTEM : RESPONDER_SYSTEM;
 
   const historyText = history
     .map(m => `${m.role.toUpperCase()}: ${m.content}`)
     .join("\n");
 
   const finalPrompt = `
-${systemInstructions}
+${systemPrompt}
 
 Conversation so far:
 ${historyText}

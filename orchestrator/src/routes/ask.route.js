@@ -1,11 +1,11 @@
 import express from "express";
-import { listRepos, createRepo } from "../services/githubService.js";
 import { githubCapabilities } from "../capabilities/githubCapabilities.js";
-import { renameRepo } from "../services/githubService.js";
 import { listFiles, readFile } from "../services/fileService.js";
 import { fileCapabilities } from "../capabilities/fileCapabilities.js";
 import { writeFile } from "../services/fileService.js";
 import { uploadFile } from "../services/fileService.js";
+import { generateResponse } from "../services/geminiService.js";
+
 
 const router = express.Router();
 
@@ -16,6 +16,11 @@ function normalizeRepoName(name = "") {
     .replace(/\s+/g, "-")
     .replace(/[^a-z0-9-_]/g, "");
 }
+
+function missingCreateRepoParams(params = {}) {
+  return !params.name;
+}
+
 
 router.post("/", async (req, res) => {
     console.log("---- /ask HIT ----");
@@ -89,136 +94,459 @@ const has_wiki =
   try {
     let result;
 
-    if (resolvedAction === "list_repos") {
-      result = await listRepos(token);
-      return res.json({ success: true, repositories: result });
+    if (resolvedAction === "list_github_repos") {
+  const response = await fetch(
+    "http://localhost:5000/api/actions/list-github-repos",
+    {
+      headers: {
+        "X-User-Id": req.userId,
+        "X-Github-Token": token
+      }
     }
+  );
+
+  if (!response.ok) {
+  const errorBody = await response.json();
+  throw new Error(
+    errorBody.error ||
+    errorBody.message ||
+    "Failed to list GitHub repositories"
+  );
+}
+
+  const repos = await response.json();
+
+  const aiText = await generateResponse({
+    action: "list_github_repos",
+    toolResult: {
+      source: "github",
+      count: repos.length,
+      repos
+    }
+  });
+
+  return res.json({
+  success: true,
+  aiResponse: aiText,
+  data: {
+    type: "github_repos",
+    repos
+  }
+});
+
+}
+
+
 
     if (resolvedAction === "create_repo") {
-      if (!name) {
-        return res.status(400).json({
-          success: false,
-          error: "Repository name is required"
-        });
-      }
 
-      const repoName = normalizeRepoName(name);
+  // 🔴 Missing name → ask question
+  if (!name) {
+    const aiText = await generateResponse({
+      mode: "clarification",
+      userInput: "create repo",
+      action: "create_repo",
+      missing: ["name"]
+    });
 
-      result = await createRepo(token, {
-        name: repoName,
-        description,
-        private: Boolean(isPrivate),
-        auto_init: Boolean(initialize_with_readme),
-        gitignore_template,
-        license_template,
-        has_issues: has_issues ?? true,
-        has_projects: has_projects ?? true,
-        has_wiki: has_wiki ?? true
-      });
-
-      return res.json({
-        success: true,
-        repo: {
-          name: result.name,
-          url: result.html_url,
-          private: result.private,
-          description: result.description
-        }
-      });
-    }
-
-    if (resolvedAction === "rename_repo") {
-  const oldName =
-  req.body.old_name ??
-  req.body.current_name ??
-  req.body.repo_name ??
-  req.body.parameters?.old_name ??
-  req.body.parameters?.current_name ??
-  req.body.parameters?.repo_name;
-
-const newName =
-  req.body.new_name ??
-  req.body.parameters?.new_name;
-
-
-  if (!oldName || !newName) {
-    return res.status(400).json({
+    return res.json({
       success: false,
-      error: "Both old_name and new_name are required"
+      needsInput: true,
+      aiResponse: aiText,
+      pendingAction: "create_repo"
     });
   }
-  
+
+  // 🟢 Create repo
+  const repoName = normalizeRepoName(name);
+
+  const response = await fetch(
+  "http://localhost:5000/api/actions/create-repo"
+,
+  {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-User-Id": req.userId,
+      "X-Session-Id": req.sessionId,
+      "X-Github-Token": token
+    },
+    body: JSON.stringify({
+      name: repoName,
+      description,
+      private: Boolean(isPrivate),
+      initialize_with_readme,
+      gitignore_template,
+      license_template
+    })
+  }
+);
+
+if (!response.ok) {
+  const errorBody = await response.json();
+  throw new Error(
+    errorBody.error ||
+    errorBody.message ||
+    "Create repository failed"
+  );
+}
+
+const result = await response.json();
+
+  // 🧠 ✅ CALL GEMINI AFTER TOOL EXECUTION
+  const aiText = await generateResponse({
+    mode: "action",
+    userInput: `create repo ${repoName}`,
+    action: "create_repo",
+    toolResult: {
+      name: result.name,
+      url: result.html_url,
+      private: result.private,
+      description: result.description
+    }
+  });
+
+  // ✅ Send conversational reply (not raw JSON)
+  return res.json({
+    success: true,
+    aiResponse: aiText
+  });
+}
+
+if (resolvedAction === "update_repo") {
+  const { name, private: isPrivate, add_readme } = req.body.parameters || {};
+
+  // If repo name is missing, ask clarification
+  if (!name) {
+    const aiText = await generateResponse({
+      mode: "clarification",
+      action: "update_repo",
+      missing: ["repository name"]
+    });
+
+    return res.json({
+      success: false,
+      needsInput: true,
+      pendingAction: "update_repo",
+      aiResponse: aiText
+    });
+  }
+
+  const response = await fetch(
+    "http://localhost:5000/api/actions/update-repo",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-User-Id": req.userId,
+        "X-Github-Token": token
+      },
+      body: JSON.stringify({
+        name,
+        private: isPrivate,
+        add_readme
+      })
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || error.message || "Update repo failed");
+  }
+
+  const result = await response.json();
+
+  return res.json({
+    success: true,
+    aiResponse: await generateResponse({
+      mode: "action",
+      action: "update_repo",
+      toolResult: {
+      name: result.name,
+      url: result.html_url,
+      changed: {
+        private: typeof isPrivate === "boolean" ? isPrivate : undefined,
+        add_readme: add_readme === true ? true : undefined
+      }
+}
+
+    })
+  });
+}
+
+
+    if (resolvedAction === "rename_repo") {
+
+  // 1️⃣ Extract explicit parameters FIRST (highest priority)
+  let oldName =
+    req.body.old_name ??
+    req.body.current_name ??
+    req.body.repo_name ??
+    req.body.parameters?.old_name ??
+    req.body.parameters?.current_name ??
+    req.body.parameters?.repo_name ??
+    null;
+
+  let newName =
+    req.body.new_name ??
+    req.body.parameters?.new_name ??
+    null;
+
+  // 2️⃣ Read continuation ONLY IF something is missing
+  const continuation =
+    (!oldName || !newName)
+      ? req.body.parameters?._continuation ??
+        req.body.parameters?.user_input
+      : null;
+
+  // 3️⃣ Smart parsing (SAFE, NON-GREEDY)
+  if (continuation) {
+
+    // Case 1: "change X to Y" / "rename X to Y"
+    const renameMatch =
+      continuation.match(/(?:change|rename)\s+(\S+)\s+to\s+(\S+)/i);
+
+    if (renameMatch) {
+      oldName ??= renameMatch[1];
+      newName ??= renameMatch[2];
+    }
+
+    // Case 2: user just typed the new name (e.g. "mcp22")
+    else if (oldName && !newName) {
+      const candidate = continuation.trim();
+
+      // repo names must be single token
+      if (/^[\w.-]+$/.test(candidate)) {
+        newName = candidate;
+      }
+    }
+  }
+
+  // 4️⃣ Ask clarification ONLY if truly missing
+  if (!oldName || !newName) {
+    const aiText = await generateResponse({
+      mode: "clarification",
+      action: "rename_repo",
+      missing: [
+        !oldName && "current repository name",
+        !newName && "new repository name"
+      ].filter(Boolean)
+    });
+
+    return res.json({
+      success: false,
+      needsInput: true,
+      pendingAction: "rename_repo",
+      aiResponse: aiText
+    });
+  }
+
+  // 5️⃣ Normalize names (MANDATORY)
   const normalizedOld = normalizeRepoName(oldName);
   const normalizedNew = normalizeRepoName(newName);
 
-  const owner = req.user?.login || "Rairebsr"; // or fetch from token
+  if (normalizedOld === normalizedNew) {
+    throw new Error(
+      "New repository name must be different from the current name."
+    );
+  }
 
-  const result = await renameRepo(
-    token,
-    owner,
-    normalizedOld,
-    normalizedNew
+  // 6️⃣ Call backend action
+  const response = await fetch(
+    "http://localhost:5000/api/actions/rename-repo",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-User-Id": req.userId,
+        "X-Github-Token": token
+      },
+      body: JSON.stringify({
+        oldName: normalizedOld,
+        newName: normalizedNew
+      })
+    }
   );
+
+  if (!response.ok) {
+    const errorBody = await response.json();
+    throw new Error(
+      errorBody.error ||
+      errorBody.message ||
+      "Rename repository failed"
+    );
+  }
+
+  const result = await response.json();
+
+  // 7️⃣ Success response (NO LOOP)
+  return res.json({
+    success: true,
+    aiResponse: await generateResponse({
+      mode: "action",
+      action: "rename_repo",
+      toolResult: {
+        old: normalizedOld,
+        new: result.name,
+        url: result.html_url
+      }
+    })
+  });
+}
+
+if (resolvedAction === "delete_repo") {
+  const repoName = parameters.name;
+
+  if (!repoName) {
+    return res.json({
+      success: false,
+      needsInput: true,
+      aiResponse: "Please provide the repository name to delete.",
+      pendingAction: "delete_repo"
+    });
+  }
+
+  const response = await fetch(
+    "http://localhost:5000/api/actions/delete-repo",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-User-Id": req.userId,
+        "X-Github-Token": token
+      },
+      body: JSON.stringify({ name: repoName })
+    }
+  );
+
+  const result = await response.json();
+
+  const aiText = await generateResponse({
+    mode: "action",
+    action: "delete_repo",
+    toolResult: result
+  });
+
+  return res.json({ success: true, aiResponse: aiText });
+}
+
+
+    if (resolvedAction === "list_files") {
+  const path = req.body.path ?? parameters.path ?? ".";
+
+  const files = await listFiles(path);
+
+  const aiText = await generateResponse({
+    mode: "file",               // ✅ IMPORTANT
+    action: "list_files",
+    toolResult: files
+  });
 
   return res.json({
     success: true,
-    repo: {
-      old: normalizedOld,
-      new: result.name,
-      url: result.html_url
-    }
+    aiResponse: aiText
   });
 }
-    if (resolvedAction === "list_files") {
-    const path =
-      req.body.path ??
-      parameters.path ??
-      ".";
 
-    const files = await listFiles(path);
-
-    return res.json({
-      success: true,
-      files
-    });
-}
     if (resolvedAction === "read_file") {
-    const path =
-      req.body.path ??
-      parameters.path;
+  const filePath = req.body.path ?? parameters.path;
 
-    const content = await readFile(path);
+  if (!filePath) {
+    const aiText = await generateResponse({
+      mode: "clarification",
+      action: "read_file",
+      missing: ["file path"]
+    });
 
     return res.json({
-      success: true,
-      content
+      success: false,
+      needsInput: true,
+      aiResponse: aiText,
+      pendingAction: "read_file"
     });
-}
-    if (resolvedAction === "write_file") {
-  const filePath =
-    req.body.path ??
-    parameters.path;
+  }
 
-  const content =
-    req.body.content ??
-    parameters.content;
+  const content = await readFile(filePath);
+
+  const aiText = await generateResponse({
+    mode: "file",
+    action: "read_file",
+    toolResult: content
+  });
+
+  return res.json({
+    success: true,
+    aiResponse: aiText
+  });
+}
+
+    if (resolvedAction === "write_file") {
+  const filePath = req.body.path ?? parameters.path;
+  const content = req.body.content ?? parameters.content;
+
+  if (!filePath || !content) {
+    const aiText = await generateResponse({
+      mode: "clarification",
+      action: "write_file",
+      missing: [
+        !filePath && "file path",
+        !content && "file content"
+      ].filter(Boolean)
+    });
+
+    return res.json({
+      success: false,
+      needsInput: true,
+      aiResponse: aiText,
+      pendingAction: "write_file"
+    });
+  }
 
   const result = await writeFile(filePath, content);
 
+  const aiText = await generateResponse({
+    mode: "file",
+    action: "write_file",
+    toolResult: result
+  });
+
   return res.json({
     success: true,
-    result
+    aiResponse: aiText
   });
 }
+
     if (resolvedAction === "upload_file") {
-  const filename =
-    req.body.filename ?? parameters.filename;
-  const content_base64 =
-    req.body.content_base64 ?? parameters.content_base64;
+  const filename = req.body.filename ?? parameters.filename;
+  const content_base64 = req.body.content_base64 ?? parameters.content_base64;
+
+  if (!filename || !content_base64) {
+    const aiText = await generateResponse({
+      mode: "clarification",
+      action: "upload_file",
+      missing: ["filename and file content"]
+    });
+
+    return res.json({
+      success: false,
+      needsInput: true,
+      aiResponse: aiText,
+      pendingAction: "upload_file"
+    });
+  }
 
   const result = await uploadFile(filename, content_base64);
 
-  return res.json({ success: true, result });
+  const aiText = await generateResponse({
+    mode: "file",
+    action: "upload_file",
+    toolResult: result
+  });
+
+  return res.json({
+    success: true,
+    aiResponse: aiText
+  });
 }
 
     return res.status(400).json({
@@ -227,12 +555,20 @@ const newName =
     });
 
   } catch (err) {
-    console.error("GitHub error:", err.message);
-    return res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
+  console.error("File/Git error:", err.message);
+
+  const aiText = await generateResponse({
+    mode: "error",
+    action: resolvedAction,
+    errorMessage: err.message
+  });
+
+  return res.status(500).json({
+    success: false,
+    aiResponse: aiText
+  });
+}
+
 });
 
 export default router;

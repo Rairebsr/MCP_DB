@@ -18,6 +18,8 @@ const App = () => {
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef(null);
   const [metrics, setMetrics] = useState([]);
+  const [pendingAction, setPendingAction] = useState(null);
+
 
 
   
@@ -225,7 +227,31 @@ const handleFileUpload = async (file) => {
     setInputValue(e.target.value);
   };
 
-  const renderMessageContent = (content) => {
+  const renderMessageContent = (content, type) => {
+  // ✅ Case 0: Repo list (structured data)
+  if (type === "repos" && Array.isArray(content)) {
+    return (
+      <ul className="space-y-2">
+        {content.map(repo => (
+          <li
+            key={repo.name}
+            className="flex items-center gap-2"
+          >
+            <a
+              href={repo.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-400 hover:underline"
+            >
+              {repo.name}
+            </a>
+            {repo.private && <span title="Private">🔒</span>}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
   // Case 1: Plain string
   if (typeof content === "string") {
     return (
@@ -235,7 +261,7 @@ const handleFileUpload = async (file) => {
     );
   }
 
-  // Case 2: Array handling (Gemini/Puter structured content)
+  // Case 2: Gemini / Puter structured text parts
   if (Array.isArray(content)) {
     const text = content
       .filter(part => part && part.type === "text")
@@ -249,13 +275,14 @@ const handleFileUpload = async (file) => {
     );
   }
 
-  // Case 3: Fallback for objects (The error likely hits here if data is null/undefined)
+  // Case 3: Fallback
   return (
     <pre className="whitespace-pre-wrap text-sm bg-gray-900 p-2 rounded">
       {content ? JSON.stringify(content, null, 2) : "Empty response"}
     </pre>
   );
 };
+
 
 const startRequest = () => ({
   id: crypto.randomUUID(),
@@ -271,8 +298,8 @@ const startRequest = () => ({
   });
 
   const handleSubmit = async (e) => {
-    const req = startRequest();
-    e.preventDefault();
+  const req = startRequest();
+  e.preventDefault();
 
   if (!user) {
     setMessages(prev => [...prev, {
@@ -293,101 +320,118 @@ const startRequest = () => ({
     }]);
     return;
   }
-  
+
   if (!inputValue.trim()) return;
 
   const currentInput = inputValue;
 
-  const userMessage = {
+  // show user message immediately
+  setMessages(prev => [...prev, {
     id: Date.now(),
-    type: 'user',
+    type: "user",
     content: currentInput,
     timestamp: new Date()
-  };
-
-  setMessages(prev => [...prev, userMessage]);
-
-  let chatHistory = messages.map(m => ({
-    role: m.type === "user" ? "user" : "assistant",
-    content:
-      typeof m.content === "string"
-        ? m.content
-        : JSON.stringify(m.content)
-  }));
+  }]);
 
   setIsProcessing(true);
-  setInputValue('');
+  setInputValue("");
 
   try {
-    let aiResponse = await askPuter(currentInput, chatHistory,"router");
+    let payload;
 
-    let parsed = null;
-    try { parsed = JSON.parse(aiResponse); } catch {}
+    // 🔒 CONTINUATION MODE (NO PUTER)
+    // 🔒 MODIFIED CONTINUATION MODE in App.jsx
+      if (pendingAction) {
+        // Instead of bypassing, let Puter extract params from the new input
+        const routerResponse = await askPuter(`For the ${pendingAction} action: ${currentInput}`, chatHistory, "router");
+        try {
+          payload = JSON.parse(routerResponse);
+        } catch {
+          payload = { action: pendingAction, parameters: { _continuation: currentInput } };
+        }
+      } else {
+            // 🧠 NORMAL ROUTER MODE
+      const chatHistory = messages
+        .slice(-4)
+        .map(m => ({
+          role: m.type === "user" ? "user" : "assistant",
+          content: typeof m.content === "string"
+            ? m.content
+            : JSON.stringify(m.content)
+        }));
 
-    if (parsed?.action) {
-      const backendRes = await fetch("http://localhost:4000/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(parsed),
-        credentials: "include"
-      });
+      const routerResponse = await askPuter(currentInput, chatHistory, "router");
 
-      const toolResult = await backendRes.json();
+      let parsed;
+      try {
+        parsed = JSON.parse(routerResponse);
+      } catch {
+        // fallback: router responded with text
+        setMessages(prev => [...prev, {
+          id: Date.now(),
+          type: "assistant",
+          content: routerResponse,
+          timestamp: new Date()
+        }]);
+        return;
+      }
 
-      const toolOutputStr = `
-IMPORTANT:
-You are now in RESPONSE MODE.
-DO NOT return JSON.
-DO NOT return structured data.
-DO NOT repeat the tool output.
-
-User request:
-"${currentInput}"
-
-Tool executed:
-${parsed.action}
-
-Tool result:
-${JSON.stringify(toolResult)}
-
-Respond to the user in a clear, helpful, conversational way.
-- Be specific to the user's request
-- Do NOT expose raw JSON unless asked
-- Summarize important details
-`;
-
-
-      chatHistory.push({ role: "user", content: currentInput });
-      chatHistory.push({ role: "assistant", content: aiResponse });
-
-      aiResponse = await askPuter(toolOutputStr, chatHistory,"responder");
+      payload = parsed;
     }
+
+    // 🚀 SEND TO ORCHESTRATOR
+    const backendRes = await fetch("http://localhost:4000/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(payload)
+    });
+
+    const data = await backendRes.json();
+
+    // 📦 STRUCTURED DATA (repos, files, etc.)
+    if (data.data?.type === "github_repos") {
+      setMessages(prev => [...prev, {
+        id: Date.now(),
+        type: "repos",
+        content: data.data.repos,
+        timestamp: new Date()
+      }]);
+    }
+
+    // ❓ STILL NEED INPUT
+    if (data.needsInput && data.pendingAction) {
+      setPendingAction(data.pendingAction);
+
+      setMessages(prev => [...prev, {
+        id: Date.now(),
+        type: "assistant",
+        content: data.aiResponse,
+        timestamp: new Date()
+      }]);
+
+      return;
+    }
+
+    // ✅ ACTION COMPLETE
+    setPendingAction(null);
 
     setMessages(prev => [...prev, {
       id: Date.now(),
       type: "assistant",
-      content: aiResponse,
+      content: data.aiResponse,
       timestamp: new Date()
     }]);
 
-    setMetrics(prev => [
-  ...prev,
-  finishRequest(req, true)
-]);
-
-
+    setMetrics(prev => [...prev, finishRequest(req, true)]);
   } catch (err) {
     console.error("HANDLE SUBMIT ERROR:", err);
-
-    setMetrics(prev => [
-  ...prev,
-  finishRequest(req, false)
-]);
-
+    setMetrics(prev => [...prev, finishRequest(req, false)]);
   } finally {
     setIsProcessing(false);
   }
 };
+
 
   const handleServerClick = (server) => {
     setSelectedServer(server);
@@ -626,7 +670,7 @@ Respond to the user in a clear, helpful, conversational way.
               {messages.map((message) => (
                 <div key={message.id} className="flex flex-col mb-2">
                   <div className={getMessageStyles(message.type)}>
-                    {renderMessageContent(message.content)}
+                    {renderMessageContent(message.content,message.type)}
                   </div>
                   <div
                     className={`text-xs text-gray-500 mt-1 ${

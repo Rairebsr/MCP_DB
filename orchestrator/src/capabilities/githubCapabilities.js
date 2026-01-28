@@ -1,7 +1,7 @@
 // backend/capabilities/githubCapabilities.js
 
 export const githubCapabilities = {
-  list_repos: {
+  list_github_repos: {
     description: "List all repositories for the authenticated user",
     parameters: []
   },
@@ -9,6 +9,11 @@ export const githubCapabilities = {
   create_repo: {
     description: "Create a new GitHub repository",
     parameters: ["name", "private", "initialize_with_readme"]
+  },
+
+  update_repo: {
+    description: "Update repository settings like visibility or README",
+    parameters: ["name", "private", "add_readme"]
   },
 
   rename_repo: {

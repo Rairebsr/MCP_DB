@@ -11,7 +11,7 @@
   "type": "module",
   "description": "",
   "dependencies": {
-    "@google/genai": "^1.32.0",
+    "@google/genai": "^1.35.0",
     "@langchain/google-genai": "^2.1.0",
     "@langchain/langgraph": "^1.0.4",
     "body-parser": "^2.2.0",
@@ -22,6 +22,7 @@
     "express-rate-limit": "^8.2.1",
     "langchain": "^1.2.0",
     "multer": "^2.0.2",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "uuid": "^13.0.0"
   }
 }
