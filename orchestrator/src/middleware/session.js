@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 
-// 🛑 THIS LINE WAS MISSING
+
 const sessionMemory = {}; 
 
 export default async function sessionMiddleware(req, res, next) {

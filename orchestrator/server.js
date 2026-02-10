@@ -4,8 +4,6 @@ import cookieParser from "cookie-parser";
 import bodyParser from "body-parser";
 import "dotenv/config";
 import rateLimit from "express-rate-limit";
-import fileRoute from "./src/routes/file.route.js";
-
 import askRoute from "./src/routes/ask.route.js";
 import authRoute from "./src/routes/auth.route.js";
 import sessionMiddleware from "./src/middleware/session.js";
@@ -36,8 +34,6 @@ app.use("/ask", askLimiter);
 
 app.use("/ask", askRoute);
 app.use("/auth", authRoute);
-
-app.use("/file", fileRoute);
 
 app.get("/test", (_, res) => res.send("🤖 Orchestrator running"));
 

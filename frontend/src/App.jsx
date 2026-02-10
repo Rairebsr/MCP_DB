@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { askPuter } from './puter/agent';
+import Editor from "@monaco-editor/react";
 
 
 const App = () => {
@@ -19,10 +20,22 @@ const App = () => {
   const fileInputRef = useRef(null);
   const [metrics, setMetrics] = useState([]);
   const [pendingAction, setPendingAction] = useState(null);
+  const [showAnalytics, setShowAnalytics] = useState(true);
 
+  // Inside App component
+  const [editorFile, setEditorFile] = useState({
+    path: null,
+    content: "",
+    isOpen: false,
+    hash: null
+  });
 
+  // Helper to open editor
+  const openInEditor = (path, content, hash) => {
+    setEditorFile({ path, content, hash, isOpen: true });
+  };
 
-  
+    
 
 useEffect(() => {
   console.log("[auth] useEffect mount; url:", window.location.href);
@@ -388,7 +401,13 @@ const startRequest = () => ({
     });
 
     const data = await backendRes.json();
-
+    if (data.editorData) {
+      openInEditor(
+        data.editorData.path, 
+        data.editorData.content, 
+        data.editorData.hash
+      );
+    }
     // 📦 STRUCTURED DATA (repos, files, etc.)
     if (data.data?.type === "github_repos") {
       setMessages(prev => [...prev, {
@@ -432,6 +451,50 @@ const startRequest = () => ({
   }
 };
 
+  const handleSaveFromEditor = async () => {
+  if (!user?.login) return;
+
+  try {
+    const res = await fetch("http://localhost:5000/api/files/write", {
+      method: "POST",
+      headers: { 
+        "Content-Type": "application/json",
+        "X-User-Id": user.login 
+      },
+      body: JSON.stringify({
+        path: editorFile.path,
+        content: editorFile.content,
+        lastKnownHash: editorFile.hash 
+      })
+    });
+
+    const data = await res.json();
+
+    if (res.status === 409) {
+      setMessages(prev => [...prev, {
+        id: Date.now(),
+        type: 'error',
+        content: `🚨 Conflict in ${editorFile.path}! The file was modified externally.`,
+        timestamp: new Date()
+      }]);
+    } else if (res.ok) {
+      // ✅ SUCCESS: Update local state with the NEW hash from the server
+      setEditorFile(prev => ({
+        ...prev,
+        hash: data.doc.hash // Syncing the new hash is critical
+      }));
+
+      setMessages(prev => [...prev, {
+        id: Date.now(),
+        type: 'system',
+        content: `✅ Successfully saved ${editorFile.path}`,
+        timestamp: new Date()
+      }]);
+    }
+  } catch (err) {
+    console.error("Save error:", err);
+  }
+};
 
   const handleServerClick = (server) => {
     setSelectedServer(server);
@@ -501,413 +564,369 @@ const startRequest = () => ({
   };
 
   return (
-    <div className="flex h-screen bg-gray-900 text-white">
-      {/* Left Panel - MCP Servers */}
-      <div className="w-80 bg-gray-800 border-r border-gray-700 flex flex-col">
-        <div className="p-6 border-b border-gray-700">
-          <div className="flex justify-between items-center">
-            <h2 className="text-xl font-semibold">MCP Servers</h2>
-            <span className="bg-blue-600 text-white px-2 py-1 rounded-full text-xs font-medium">
-              {performanceData.activeConnections} Active
+  <div className="flex h-screen bg-gray-900 text-white overflow-hidden">
+    {/* Left Panel - MCP Servers */}
+    <div className="w-80 bg-gray-800 border-r border-gray-700 flex flex-col shrink-0">
+      <div className="p-6 border-b border-gray-700">
+        <div className="flex justify-between items-center">
+          <h2 className="text-xl font-semibold">MCP Servers</h2>
+          <span className="bg-blue-600 text-white px-2 py-1 rounded-full text-xs font-medium">
+            {performanceData.activeConnections} Active
+          </span>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-4">
+        <div className="space-y-3">
+          {mcServers?.map((server) => (
+            <div
+              key={server.id}
+              className={`p-4 rounded-xl cursor-pointer transition-all duration-200 border-2 ${
+                selectedServer?.id === server.id
+                  ? "bg-gray-700 border-blue-500 shadow-lg shadow-blue-500/20"
+                  : "bg-gray-750 border-transparent hover:bg-gray-700 hover:border-gray-600"
+              } ${server.status === "offline" ? "opacity-50" : ""}`}
+              onClick={() => handleServerClick(server)}
+            >
+              <div className="flex items-start space-x-3">
+                <div className="text-2xl">{server.icon}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex justify-between items-start mb-1">
+                    <span className="font-medium text-sm truncate">{server.name}</span>
+                    <span
+                      className={`text-xs font-medium px-2 py-1 rounded-full ${
+                        server.status === "online"
+                          ? "bg-green-900 text-green-300"
+                          : "bg-red-900 text-red-300"
+                      }`}
+                    >
+                      ● {server.status}
+                    </span>
+                  </div>
+                  <p className="text-gray-400 text-xs leading-relaxed">
+                    {server.description}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Tools Section */}
+      {selectedServer && (
+        <div className="border-t border-gray-700 p-6">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="font-semibold">Available Tools</h3>
+            <span className="bg-gray-700 text-gray-300 px-2 py-1 rounded-full text-xs">
+              {tools.length} tools
             </span>
           </div>
-        </div>
-        
-        <div className="flex-1 overflow-y-auto p-4">
-          <div className="space-y-3">
-            {mcServers?.map(server => (
+          <div className="space-y-2">
+            {tools.map((tool, index) => (
               <div
-                key={server.id}
-                className={`p-4 rounded-xl cursor-pointer transition-all duration-200 border-2 ${
-                  selectedServer?.id === server.id
-                    ? 'bg-gray-700 border-blue-500 shadow-lg shadow-blue-500/20'
-                    : 'bg-gray-750 border-transparent hover:bg-gray-700 hover:border-gray-600'
-                } ${server.status === 'offline' ? 'opacity-50' : ''}`}
-                onClick={() => handleServerClick(server)}
+                key={index}
+                className="p-3 bg-gray-750 rounded-lg cursor-pointer transition-all duration-200 hover:bg-gray-700 hover:border-gray-500 border-2 border-transparent"
+                onClick={() => handleToolClick(tool)}
               >
                 <div className="flex items-start space-x-3">
-                  <div className="text-2xl">{server.icon}</div>
+                  <div className="text-lg">⚙️</div>
                   <div className="flex-1 min-w-0">
-                    <div className="flex justify-between items-start mb-1">
-                      <span className="font-medium text-sm truncate">{server.name}</span>
-                      <span className={`text-xs font-medium px-2 py-1 rounded-full ${
-                        server.status === 'online' 
-                          ? 'bg-green-900 text-green-300' 
-                          : 'bg-red-900 text-red-300'
-                      }`}>
-                        ● {server.status}
-                      </span>
+                    <div className="font-mono font-semibold text-sm mb-1">{tool.name}</div>
+                    <div className="text-gray-400 text-xs leading-relaxed">
+                      {tool.description}
                     </div>
-                    <p className="text-gray-400 text-xs leading-relaxed">
-                      {server.description}
-                    </p>
                   </div>
                 </div>
               </div>
             ))}
           </div>
         </div>
-
-        {/* Tools Section */}
-        {selectedServer && (
-          <div className="border-t border-gray-700 p-6">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="font-semibold">Available Tools</h3>
-              <span className="bg-gray-700 text-gray-300 px-2 py-1 rounded-full text-xs">
-                {tools.length} tools
-              </span>
-            </div>
-            <div className="space-y-2">
-              {tools.map((tool, index) => (
-                <div
-                  key={index}
-                  className="p-3 bg-gray-750 rounded-lg cursor-pointer transition-all duration-200 hover:bg-gray-700 hover:border-gray-500 border-2 border-transparent"
-                  onClick={() => handleToolClick(tool)}
-                >
-                  <div className="flex items-start space-x-3">
-                    <div className="text-lg">⚙️</div>
-                    <div className="flex-1 min-w-0">
-                      <div className="font-mono font-semibold text-sm mb-1">
-                        {tool.name}
-                      </div>
-                      <div className="text-gray-400 text-xs leading-relaxed">
-                        {tool.description}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col bg-gray-900">
-        {/* Chat/Messages Area */}
-        <div className="flex-1 flex flex-col">
-          <div className="p-6 border-b border-gray-700">
-            <div className="flex justify-between items-center">
-              <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-500 to-green-500 bg-clip-text text-transparent">
-                MCP Orchestrator
-              </h2>
-               {/* AUTH AREA */}
-              {/* AUTH AREA */}
-<div className="flex items-center space-x-4">
-
-  {/* ───────── GitHub Auth ───────── */}
-  {user ? (
-    <>
-      <div className="flex items-center space-x-2">
-        {user.avatar_url && (
-          <img
-            src={user.avatar_url}
-            alt="avatar"
-            className="w-8 h-8 rounded-full"
-          />
-        )}
-        <div className="text-sm text-right">
-          <div className="font-medium">GitHub</div>
-          <div className="truncate max-w-[10rem]">
-            {user.login || user.name}
-          </div>
-        </div>
-      </div>
-
-      <button
-        onClick={async () => {
-          await fetch("http://localhost:4000/auth/logout", {
-            method: "POST",
-            credentials: "include",
-          });
-          await fetchAuthStatus();
-        }}
-        className="bg-red-600 text-white px-3 py-2 rounded-lg text-sm font-medium hover:bg-red-700 transition"
-      >
-        Logout GitHub
-      </button>
-    </>
-  ) : (
-    <button
-      onClick={() => {
-        window.location.href =
-          `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&scope=repo,user`;
-      }}
-      className="bg-orange-500 text-white px-3 py-2 rounded-lg text-sm font-medium hover:bg-orange-600 transition"
-    >
-      Login GitHub
-    </button>
-  )}
-
-  {/* ───────── AI Status (Puter) ───────── */}
-  {puterReady ? (
-    <div className="flex items-center space-x-2 text-sm text-purple-300">
-      <span className="w-2 h-2 rounded-full bg-green-400"></span>
-      <span>AI Ready</span>
+      )}
     </div>
-  ) : (
-    <div className="flex items-center space-x-2 text-sm text-yellow-300">
-  <span className="w-2 h-2 rounded-full bg-yellow-400"></span>
-  <button
-    onClick={loginToPuter}
-    className="underline hover:text-yellow-200 transition"
-  >
-    Login AI
-  </button>
-</div>
 
-  )}
-
-</div>
-{/* end AUTH AREA */}
-
-
-</div>
-          </div>
-          
-          <div className="flex-1 flex flex-col overflow-hidden">
-            <div className="flex-1 overflow-y-auto p-6" style={{ maxHeight: 'calc(100vh - 200px)' }}>
-              {messages.map((message) => (
-                <div key={message.id} className="flex flex-col mb-2">
-                  <div className={getMessageStyles(message.type)}>
-                    {renderMessageContent(message.content,message.type)}
-                  </div>
-                  <div
-                    className={`text-xs text-gray-500 mt-1 ${
-                      message.type === 'user' ? 'text-right mr-2' : 'ml-2'
-                    }`}
-                  >
-                    {message.timestamp.toLocaleTimeString()}
+      {/* Main Content Area - Split into Chat (Left) and Editor (Right) */}
+    <div className="flex-1 flex flex-col bg-gray-900 overflow-hidden">
+      {/* Shared Header (Auth Area) */}
+      <div className="p-6 border-b border-gray-700">
+        <div className="flex justify-between items-center">
+          <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-500 to-green-500 bg-clip-text text-transparent">
+            MCP Orchestrator
+          </h2>
+              
+              {/* Auth Area Code */}
+          <div className="flex items-center space-x-4">
+            {user ? (
+              <>
+                <div className="flex items-center space-x-2">
+                  {user.avatar_url && (
+                    <img src={user.avatar_url} alt="avatar" className="w-8 h-8 rounded-full" />
+                  )}
+                  <div className="text-sm text-right">
+                    <div className="font-medium">GitHub</div>
+                    <div className="truncate max-w-[10rem]">{user.login || user.name}</div>
                   </div>
                 </div>
-              ))}
-              {isProcessing && (
-                <div className="flex space-x-2 items-center">
-                  <div className="bg-gray-700 rounded-2xl px-4 py-3">
-                    <div className="flex space-x-1">
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
-                    </div>
-                  </div>
-                </div>
-              )}
-              <div ref={messagesEndRef} />
-            </div>
-
+                <button
+                  onClick={async () => {
+                    await fetch("http://localhost:4000/auth/logout", { method: "POST", credentials: "include" });
+                    await fetchAuthStatus();
+                  }}
+                  className="bg-red-600 text-white px-3 py-2 rounded-lg text-sm font-medium hover:bg-red-700 transition"
+                >
+                  Logout GitHub
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={() => window.location.href = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&scope=repo,user`}
+                className="bg-orange-500 text-white px-3 py-2 rounded-lg text-sm font-medium hover:bg-orange-600 transition"
+              >
+                Login GitHub
+              </button>
+            )}
+            {puterReady ? (
+              <div className="flex items-center space-x-2 text-sm text-purple-300">
+                <span className="w-2 h-2 rounded-full bg-green-400"></span>
+                <span>AI Ready</span>
+              </div>
+            ) : (
+              <div className="flex items-center space-x-2 text-sm text-yellow-300">
+                <span className="w-2 h-2 rounded-full bg-yellow-400"></span>
+                <button onClick={loginToPuter} className="underline hover:text-yellow-200 transition">Login AI</button>
+              </div>
+            )}
           </div>
         </div>
+      </div>
+          
+          {/* Horizontal Container for Chat and Editor */}
+      <div className="flex-1 flex flex-row overflow-hidden">
+        {/* Chat Section */}
+        <div className={`flex flex-col border-r border-gray-700 transition-all duration-300 ${editorFile.isOpen ? 'w-[450px]' : 'flex-1'}`}>
+          <div className="flex-1 overflow-y-auto p-6 scrollbar-thin scrollbar-thumb-gray-700">
+            {messages.map((message) => (
+              <div key={message.id} className="flex flex-col mb-2">
+                <div className={getMessageStyles(message.type)}>
+                  {renderMessageContent(message.content, message.type)}
+                </div>
+                <div className={`text-xs text-gray-500 mt-1 ${message.type === 'user' ? 'text-right mr-2' : 'ml-2'}`}>
+                  {message.timestamp.toLocaleTimeString()}
+                </div>
+              </div>
+            ))}
+            {isProcessing && (
+              <div className="flex space-x-2 items-center">
+                <div className="bg-gray-700 rounded-2xl px-4 py-3">
+                  <div className="flex space-x-1">
+                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
+                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:0.1s]"></div>
+                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:0.2s]"></div>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
 
-        {/* Input Area - Fixed at Bottom */}
-        <div className="border-t border-gray-700 bg-gray-900 p-6">
-          <form onSubmit={handleSubmit} className="max-w-4xl mx-auto">
-            <div className="flex space-x-4 items-center">
-              <input
+        {/* Input Area (Bottom of Chat) */}
+          <div className="border-t border-gray-700 bg-gray-900 p-6">
+            <form onSubmit={handleSubmit} className="flex flex-col space-y-4">
+              <div className="flex space-x-4 items-center">
+                <input
                   type="text"
                   value={inputValue}
                   onChange={handleInputChange}
                   disabled={isProcessing || !user || !puterReady}
-                  placeholder={
-                  !user
-                    ? "Login with GitHub to start..."
-                    : !puterReady
-                      ? "Login to AI (Puter) to continue..."
-                      : "Ask me anything about your repos..."
-                }
-
-
-                  className="flex-1 bg-gray-800 border-2 border-gray-700 rounded-2xl px-6 py-4 text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all duration-200"
+                  placeholder={!user ? "Login with GitHub..." : "Ask me anything..."}
+                  className="flex-1 bg-gray-800 border-2 border-gray-700 rounded-2xl px-6 py-4 text-white focus:outline-none focus:border-blue-500"
                 />
-              <button
-                type="submit"
-                disabled={isProcessing || !inputValue.trim() || !user || !puterReady}
-                className="bg-blue-600 text-white rounded-2xl p-4 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed transition-all duration-200 hover:scale-105 disabled:hover:scale-100 w-14 h-14 flex items-center justify-center"
-              >
-                {isProcessing ? '⏳' : '➤'}
-              </button>
-              <button
-                type="button"
-                disabled={isUploading}
-                onClick={() => fileInputRef.current?.click()}
-                className="bg-gray-700 text-white rounded-2xl p-4 hover:bg-gray-600 transition-all"
-              >
-                {isUploading ? "⏳" : "🔗"}
-              </button>
-
-            </div>
-            {selectedServer && (
-              <div className="text-sm text-gray-400 mt-2 ml-2">
-                Active: {selectedServer.icon} {selectedServer.name}
+                <button type="submit" disabled={isProcessing || !inputValue.trim()} className="bg-blue-600 rounded-2xl p-4 w-14 h-14">
+                  {isProcessing ? '⏳' : '➤'}
+                </button>
+                <button type="button" onClick={() => fileInputRef.current?.click()} className="bg-gray-700 rounded-2xl p-4 w-14 h-14">
+                  🔗
+                </button>
               </div>
-            )}
-          </form>
+              {selectedServer && <div className="text-sm text-gray-400 ml-2">Active: {selectedServer.icon} {selectedServer.name}</div>}
+            </form>
+          </div>
         </div>
-      </div>
 
-      {/* Right Panel - Analytics */}
-      <div className="w-80 bg-gray-800 border-l border-gray-700 overflow-y-auto">
-        <div className="p-6 border-b border-gray-700">
-          <h2 className="text-xl font-semibold">Analytics</h2>
-        </div>
-        
-        {/* Performance Metrics */}
-<div className="p-6 border-b border-gray-700">
-  <h3 className="font-semibold mb-4">Performance</h3>
-
-  <div className="grid grid-cols-2 gap-3">
-    {/* Success Rate */}
-    <div className="bg-gray-750 p-4 rounded-xl border border-gray-600 text-center">
-      <div className="text-2xl font-bold text-green-400">
-        {performanceData.successRate}%
-      </div>
-      <div className="text-gray-400 text-sm mt-1">Success Rate</div>
-    </div>
-
-    {/* Avg Response */}
-    <div className="bg-gray-750 p-4 rounded-xl border border-gray-600 text-center">
-      <div className="text-2xl font-bold text-blue-400">
-        {performanceData.responseTimes.length
-          ? Math.round(
-              performanceData.responseTimes.reduce((a, b) => a + b, 0) /
-              performanceData.responseTimes.length
-            )
-          : 0}ms
-      </div>
-      <div className="text-gray-400 text-sm mt-1">Avg Response</div>
-    </div>
-  </div>
-</div>
-
-{/* Response Time Chart */}
-<div className="p-6 border-b border-gray-700">
-  <h3 className="font-semibold mb-4">Response Time Variance</h3>
-  
-  <div className="flex items-end space-x-1 h-48">
-    {performanceData.responseTimes.map((time, index) => {
-      const maxTime = Math.max(...performanceData.responseTimes);
-      const minTime = Math.min(...performanceData.responseTimes);
-      const previousTime = index > 0 ? performanceData.responseTimes[index - 1] : time;
-      const difference = time - previousTime;
-      const variance = Math.abs(difference) / (maxTime - minTime || 1);
-      
-      return (
-        <div key={index} className="flex flex-col items-center flex-1">
-          {/* Variance indicator */}
-          <div className="relative w-full mb-2">
-            <div className="flex justify-center items-center h-6">
-              {difference !== 0 && (
-                <div className={`text-xs px-2 py-1 rounded-full ${
-                  difference > 0 
-                    ? 'bg-red-500/20 text-red-400' 
-                    : 'bg-green-500/20 text-green-400'
-                }`}>
-                  {difference > 0 ? `+${difference}` : difference}ms
-                </div>
-              )}
+        {/* Editor Section (Slides in from Right) */}
+        {editorFile.isOpen && (
+          <div className="flex-1 flex flex-col bg-[#1e1e1e] animate-in slide-in-from-right duration-300">
+            <div className="p-3 bg-gray-800 border-b border-gray-700 flex justify-between items-center">
+              <span className="text-sm font-mono text-blue-400 truncate px-2">{editorFile.path}</span>
+              <div className="flex space-x-2">
+                <button onClick={handleSaveFromEditor} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-xs font-bold">
+                  Save Changes
+                </button>
+                <button onClick={() => setEditorFile(prev => ({...prev, isOpen: false}))} className="text-gray-400 hover:text-white px-2">
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div className="flex-1">
+              <Editor
+                theme="vs-dark"
+                defaultLanguage="javascript"
+                value={editorFile.content}
+                onChange={(value) => setEditorFile(prev => ({...prev, content: value}))}
+                options={{
+                fontFamily: "'Fira Code', 'Cascadia Code', monospace",
+                fontLigatures: true,
+                cursorSmoothCaretAnimation: "on",
+                smoothScrolling: true,
+                lineHeight: 24,
+                letterSpacing: 0.5,
+                padding: { top: 20 }
+              }}
+              />
             </div>
           </div>
-          
-          {/* Main bar */}
-          <div className="relative w-full group">
-            <div className="w-full bg-gradient-to-t from-gray-800 to-gray-900 rounded-t-lg h-32 flex flex-col justify-end">
-              {/* Actual value bar */}
-              <div
-                className={`rounded-t-lg w-full transition-all duration-500 ${
-                  time <= 100 ? 'bg-gradient-to-t from-green-400 to-emerald-600' :
-                  time <= 150 ? 'bg-gradient-to-t from-yellow-400 to-amber-600' :
-                  'bg-gradient-to-t from-red-400 to-rose-600'
-                }`}
-                style={{ 
-                  height: `${((time - minTime) / (maxTime - minTime || 1)) * 90}%`,
-                  boxShadow: `0 0 20px ${
-                    time <= 100 ? 'rgba(34, 197, 94, 0.3)' :
-                    time <= 150 ? 'rgba(234, 179, 8, 0.3)' :
-                    'rgba(239, 68, 68, 0.3)'
-                  }`
-                }}
-              >
-                {/* Animated pulse for high values */}
-                {time > 150 && (
-                  <div className="absolute inset-0 rounded-t-lg bg-red-400 animate-pulse opacity-20"></div>
-                )}
+        )}
+      </div>
+    </div>
+
+      {/* Right Panel - Analytics (Retractable) */}
+<div className={`bg-gray-800 border-l border-gray-700 transition-all duration-300 flex flex-col relative shrink-0 ${showAnalytics ? 'w-80' : 'w-12'}`}>
+  
+  {/* Retract/Expand Toggle Button */}
+  <button 
+    onClick={() => setShowAnalytics(!showAnalytics)}
+    className="absolute -left-4 top-10 transform bg-gray-700 border border-gray-600 rounded-full w-8 h-8 flex items-center justify-center z-50 hover:bg-blue-600 transition-colors shadow-lg"
+    title={showAnalytics ? "Collapse Sidebar" : "Expand Sidebar"}
+  >
+    {showAnalytics ? '→' : '←'}
+  </button>
+
+  {showAnalytics ? (
+    <div className="flex flex-col h-full overflow-hidden">
+      <div className="p-6 border-b border-gray-700 shrink-0">
+        <h2 className="text-xl font-semibold flex items-center gap-2">
+          <span className="text-blue-400">📊</span> Analytics
+        </h2>
+      </div>
+      
+      <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-700">
+        {/* Performance Metrics */}
+        <div className="p-6 border-b border-gray-700">
+          <h3 className="font-semibold mb-4 text-gray-400 text-xs uppercase tracking-wider text-left">Performance</h3>
+          <div className="grid grid-cols-2 gap-3">
+            {/* Success Rate */}
+            <div className="bg-gray-750 p-4 rounded-xl border border-gray-600 text-center shadow-inner">
+              <div className="text-2xl font-bold text-green-400">
+                {performanceData.successRate}%
               </div>
-              
-              {/* Comparison line */}
-              {index > 0 && (
-                <div
-                  className="absolute left-0 right-0 h-0.5 bg-white/30"
-                  style={{
-                    bottom: `${((previousTime - minTime) / (maxTime - minTime || 1)) * 90}%`
-                  }}
-                ></div>
-              )}
+              <div className="text-gray-400 text-[10px] mt-1 uppercase tracking-tighter font-semibold">Success Rate</div>
             </div>
-            
-            {/* Enhanced tooltip */}
-            <div className="absolute -top-24 left-1/2 -translate-x-1/2 bg-gray-900 border border-gray-700 rounded-xl p-3 opacity-0 group-hover:opacity-100 transition-all z-50 shadow-2xl min-w-[160px]">
-              <div className="text-center">
-                <div className="text-2xl font-bold text-white mb-1">{time}ms</div>
-                <div className="text-xs text-gray-400 mb-2">Request {index + 1}</div>
-                
-                {index > 0 && (
-                  <div className="flex items-center justify-center space-x-2 mb-2">
-                    <div className={`text-xs ${
-                      difference > 0 ? 'text-red-400' : 'text-green-400'
-                    }`}>
-                      {difference > 0 ? '↑' : '↓'} {Math.abs(difference)}ms
+
+            {/* Avg Response */}
+            <div className="bg-gray-750 p-4 rounded-xl border border-gray-600 text-center shadow-inner">
+              <div className="text-2xl font-bold text-blue-400">
+                {performanceData.responseTimes.length
+                  ? Math.round(
+                      performanceData.responseTimes.reduce((a, b) => a + b, 0) /
+                      performanceData.responseTimes.length
+                    )
+                  : 0}ms
+              </div>
+              <div className="text-gray-400 text-[10px] mt-1 uppercase tracking-tighter font-semibold">Avg Response</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Response Time Chart */}
+        <div className="p-6 border-b border-gray-700">
+          <h3 className="font-semibold mb-4 text-gray-400 text-xs uppercase tracking-wider text-left text-left">Response Time Variance</h3>
+          <div className="flex items-end space-x-1 h-48">
+            {performanceData.responseTimes.map((time, index) => {
+              const maxTime = Math.max(...performanceData.responseTimes);
+              const minTime = Math.min(...performanceData.responseTimes);
+              const previousTime = index > 0 ? performanceData.responseTimes[index - 1] : time;
+              const difference = time - previousTime;
+              
+              return (
+                <div key={index} className="flex flex-col items-center flex-1">
+                  <div className="relative w-full group">
+                    <div className="w-full bg-gradient-to-t from-gray-800 to-gray-900 rounded-t-lg h-32 flex flex-col justify-end">
+                      <div
+                        className={`rounded-t-lg w-full transition-all duration-500 ${
+                          time <= 100 ? 'bg-gradient-to-t from-green-400 to-emerald-600' :
+                          time <= 150 ? 'bg-gradient-to-t from-yellow-400 to-amber-600' :
+                          'bg-gradient-to-t from-red-400 to-rose-600'
+                        }`}
+                        style={{ 
+                          height: `${((time - minTime) / (maxTime - minTime || 1)) * 90 + 10}%`,
+                          boxShadow: `0 0 10px ${time <= 100 ? 'rgba(34, 197, 94, 0.2)' : 'rgba(239, 68, 68, 0.2)'}`
+                        }}
+                      >
+                        {time > 150 && (
+                          <div className="absolute inset-0 rounded-t-lg bg-red-400 animate-pulse opacity-10"></div>
+                        )}
+                      </div>
                     </div>
-                    <div className="text-xs text-gray-500">
-                      from Req {index}
+                    {/* Tooltip */}
+                    <div className="absolute -top-12 left-1/2 -translate-x-1/2 bg-gray-900 border border-gray-700 rounded-lg p-2 opacity-0 group-hover:opacity-100 transition-all z-50 shadow-2xl pointer-events-none">
+                       <div className="text-xs font-bold text-white whitespace-nowrap">{time}ms</div>
                     </div>
                   </div>
-                )}
-                
-                <div className="text-xs text-gray-400">
-                  {time <= 100 ? 'Performance: Excellent' : 
-                   time <= 150 ? 'Performance: Good' : 
-                   'Performance: Needs Attention'}
+                  <div className="mt-2 text-[10px] text-gray-500 font-mono">#{index + 1}</div>
                 </div>
-              </div>
-              <div className="absolute bottom-0 left-1/2 w-3 h-3 bg-gray-900 border-b border-r border-gray-700 -translate-x-1/2 translate-y-1/2 rotate-45"></div>
-            </div>
-          </div>
-          
-          {/* X-axis */}
-          <div className="mt-2 text-center">
-            <div className="text-gray-300 text-sm font-semibold">#{index + 1}</div>
-            <div className="text-gray-500 text-xs">{time}ms</div>
+              );
+            })}
           </div>
         </div>
-      );
-    })}
-  </div>
-</div>
+
         {/* System Status */}
         <div className="p-6">
-          <h3 className="font-semibold mb-4">System Status</h3>
+          <h3 className="font-semibold mb-4 text-gray-400 text-xs uppercase tracking-wider text-left">System Status</h3>
           <div className="space-y-3">
-            <div className="flex items-center space-x-3 p-3 bg-gray-750 rounded-lg border border-gray-600">
-              <div className="w-2 h-2 bg-green-400 rounded-full"></div>
-              <span>LLM Orchestrator</span>
-            </div>
-            <div className="flex items-center space-x-3 p-3 bg-gray-750 rounded-lg border border-gray-600">
-              <div className="w-2 h-2 bg-green-400 rounded-full"></div>
-              <span>API Gateway</span>
-            </div>
-            <div className="flex items-center space-x-3 p-3 bg-gray-750 rounded-lg border border-gray-600">
-              <div className="w-2 h-2 bg-green-400 rounded-full"></div>
-              <span>Database</span>
-            </div>
+            {[
+              { name: 'LLM Orchestrator', status: 'online' },
+              { name: 'API Gateway', status: 'online' },
+              { name: 'Database', status: 'online' }
+            ].map((service) => (
+              <div key={service.name} className="flex items-center justify-between p-3 bg-gray-750 rounded-lg border border-gray-700 group hover:border-blue-500/50 transition-colors">
+                <span className="text-sm text-gray-300">{service.name}</span>
+                <div className="w-2.5 h-2.5 bg-green-400 rounded-full shadow-[0_0_8px_rgba(74,222,128,0.5)] animate-pulse"></div>
+              </div>
+            ))}
           </div>
         </div>
       </div>
-      {/* ✅ HIDDEN FILE INPUT — HERE */}
-      <input
-        type="file"
-        ref={fileInputRef}
-        className="hidden"
-        onChange={(e) => handleFileUpload(e.target.files[0])}
-      />
+    </div>
+  ) : (
+  /* Retracted View - Vertical Sidebar */
+  <div 
+    className="w-12 flex flex-col items-center py-6 h-full cursor-pointer hover:bg-gray-750 transition-all duration-300 border-l border-gray-700 bg-gray-800"
+    onClick={() => setShowAnalytics(true)}
+  >
+    {/* Rotate container to keep text centered in the narrow bar */}
+    <div className="flex-1 flex flex-col items-center justify-center w-full overflow-hidden">
+      <span className="transform -rotate-90 whitespace-nowrap font-bold tracking-[0.2em] text-[10px] uppercase text-gray-500 origin-center">
+        Analytics Dashboard
+      </span>
+    </div>
+
+    {/* Icons at the bottom */}
+    <div className="flex flex-col space-y-6 pb-10 opacity-40">
+      <span className="text-sm" title="Performance">📈</span>
+      <span className="text-sm" title="Latency">⚡</span>
+      <span className="text-sm" title="System Health">💾</span>
+    </div>
+  </div>
+)}
+</div>
+
+{/* Global Hidden Utilities */}
+<input
+  type="file"
+  ref={fileInputRef}
+  className="hidden"
+  onChange={(e) => handleFileUpload(e.target.files[0])}
+/>
     </div>
   );
 };

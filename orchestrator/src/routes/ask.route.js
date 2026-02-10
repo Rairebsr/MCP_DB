@@ -1,9 +1,6 @@
 import express from "express";
 import { githubCapabilities } from "../capabilities/githubCapabilities.js";
-import { listFiles, readFile } from "../services/fileService.js";
 import { fileCapabilities } from "../capabilities/fileCapabilities.js";
-import { writeFile } from "../services/fileService.js";
-import { uploadFile } from "../services/fileService.js";
 import { generateResponse } from "../services/geminiService.js";
 
 
@@ -430,112 +427,144 @@ if (resolvedAction === "delete_repo") {
   return res.json({ success: true, aiResponse: aiText });
 }
 
+const backendHeaders = {
+  "Content-Type": "application/json",
+  "X-User-Id": req.userId,      // This solves your "Missing Identity" error
+  "X-Github-Token": token       // Useful if backend needs to check repo permissions
+};
 
     if (resolvedAction === "list_files") {
   const path = req.body.path ?? parameters.path ?? ".";
 
-  const files = await listFiles(path);
+  const response = await fetch("http://localhost:5000/api/files/list", {
+    method: "POST",
+    headers: backendHeaders,
+    body: JSON.stringify({ path, workspaceId: req.workspaceId })
+  });
+
+  const files = await response.json();
 
   const aiText = await generateResponse({
-    mode: "file",               // ✅ IMPORTANT
+    mode: "file",
     action: "list_files",
     toolResult: files
   });
 
-  return res.json({
-    success: true,
-    aiResponse: aiText
-  });
+  return res.json({ success: true, aiResponse: aiText });
 }
 
-    if (resolvedAction === "read_file") {
-  const filePath = req.body.path ?? parameters.path;
+    // 2️⃣ READ FILE
+if (resolvedAction === "read_file") {
+    const filePath = req.body.path ?? parameters.path;
 
-  if (!filePath) {
+    if (!filePath) {
+      const aiText = await generateResponse({ mode: "clarification", action: "read_file", missing: ["file path"] });
+      return res.json({ success: false, needsInput: true, aiResponse: aiText, pendingAction: "read_file" });
+    }
+
+    const response = await fetch("http://localhost:5000/api/files/read", {
+      method: "POST",
+      headers: backendHeaders,
+      body: JSON.stringify({ path: filePath })
+    });
+
+    // 1. Get the raw data as 'result'
+    const result = await response.json();
+
+    // 2. Check if the backend returned an error (like 404 Not Found)
+    if (!response.ok) {
+      const errorText = await generateResponse({ 
+        mode: "error", 
+        action: "read_file", 
+        errorMessage: result.error || "File not found" 
+      });
+      return res.json({ success: false, aiResponse: errorText });
+    }
+
+    // 3. Generate AI explanation of the content
     const aiText = await generateResponse({
-      mode: "clarification",
+      mode: "file",
       action: "read_file",
-      missing: ["file path"]
+      toolResult: result.content
     });
 
-    return res.json({
-      success: false,
-      needsInput: true,
+    // 4. Return everything to the frontend
+    return res.json({ 
+      success: true, 
       aiResponse: aiText,
-      pendingAction: "read_file"
+      editorData: {
+        path: filePath,
+        content: result.content, // Now 'result' is defined!
+        hash: result.doc?.hash   // Safe navigation in case doc is missing
+      }
     });
-  }
-
-  const content = await readFile(filePath);
-
-  const aiText = await generateResponse({
-    mode: "file",
-    action: "read_file",
-    toolResult: content
-  });
-
-  return res.json({
-    success: true,
-    aiResponse: aiText
-  });
 }
 
-    if (resolvedAction === "write_file") {
+    // 3️⃣ WRITE FILE (With Conflict Handling)
+if (resolvedAction === "write_file") {
   const filePath = req.body.path ?? parameters.path;
   const content = req.body.content ?? parameters.content;
+  const incomingHash = req.body.hash ?? parameters.hash; // Optional: provided by UI
 
   if (!filePath || !content) {
     const aiText = await generateResponse({
       mode: "clarification",
       action: "write_file",
-      missing: [
-        !filePath && "file path",
-        !content && "file content"
-      ].filter(Boolean)
+      missing: [!filePath && "file path", !content && "file content"].filter(Boolean)
     });
+    return res.json({ success: false, needsInput: true, aiResponse: aiText, pendingAction: "write_file" });
+  }
 
+  const response = await fetch("http://localhost:5000/api/files/write", {
+    method: "POST",
+    headers: backendHeaders,
+    body: JSON.stringify({ 
+      path: filePath, 
+      content, 
+      incomingHash, 
+      workspaceId: req.workspaceId 
+    })
+  });
+
+  // Handle 409 Conflict from Backend
+  if (response.status === 409) {
+    const conflictData = await response.json();
     return res.json({
       success: false,
-      needsInput: true,
-      aiResponse: aiText,
-      pendingAction: "write_file"
+      error: "CONFLICT",
+      aiResponse: "I couldn't save the file because it was modified elsewhere. Would you like me to force the update or show you the changes?"
     });
   }
 
-  const result = await writeFile(filePath, content);
+  const result = await response.json(); // This is the updated File document
 
   const aiText = await generateResponse({
     mode: "file",
     action: "write_file",
-    toolResult: result
+    toolResult: result.doc
   });
 
-  return res.json({
-    success: true,
-    aiResponse: aiText
-  });
+  return res.json({ success: true, aiResponse: aiText });
 }
 
-    if (resolvedAction === "upload_file") {
+
+    // 4️⃣ UPLOAD FILE
+if (resolvedAction === "upload_file") {
   const filename = req.body.filename ?? parameters.filename;
   const content_base64 = req.body.content_base64 ?? parameters.content_base64;
 
   if (!filename || !content_base64) {
-    const aiText = await generateResponse({
-      mode: "clarification",
-      action: "upload_file",
-      missing: ["filename and file content"]
-    });
-
-    return res.json({
-      success: false,
-      needsInput: true,
-      aiResponse: aiText,
-      pendingAction: "upload_file"
-    });
+    const aiText = await generateResponse({ mode: "clarification", action: "upload_file", missing: ["filename and content"] });
+    return res.json({ success: false, needsInput: true, aiResponse: aiText, pendingAction: "upload_file" });
   }
 
-  const result = await uploadFile(filename, content_base64);
+  const response = await fetch("http://localhost:5000/api/files/upload", {
+    method: "POST",
+    headers: backendHeaders,
+    body: JSON.stringify({ filename, content_base64, workspaceId: req.workspaceId })
+  });
+
+  const result = await response.json();
 
   const aiText = await generateResponse({
     mode: "file",
@@ -543,12 +572,9 @@ if (resolvedAction === "delete_repo") {
     toolResult: result
   });
 
-  return res.json({
-    success: true,
-    aiResponse: aiText
-  });
+  return res.json({ success: true, aiResponse: aiText });
 }
-
+ 
     return res.status(400).json({
       success: false,
       error: "Action not implemented"
@@ -569,6 +595,7 @@ if (resolvedAction === "delete_repo") {
   });
 }
 
-});
+}
+);
 
 export default router;
