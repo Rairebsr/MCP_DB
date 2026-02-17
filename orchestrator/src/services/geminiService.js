@@ -19,7 +19,10 @@ export async function generateResponse({
   read_file: "read a file from the workspace",
   write_file: "write content to a file",
   upload_file: "upload a file to the workspace",
-  list_github_repos: "list GitHub repositories"
+  list_github_repos: "list GitHub repositories",
+  create_branch: "create a new git branch",
+  list_branch: "list all branches in the repository",
+  switch_branch: "switch to a different branch"
 };
 
 
@@ -37,6 +40,7 @@ Instructions:
 - Ask for the required information first.
 - Then briefly mention that optional settings can be customized if the user wants.
 - Do NOT force optional settings.
+- For branching, if the source branch isn't mentioned, assume they might want 'main' but don't force it.
 - Ask everything in ONE natural, friendly message.
 - Do NOT mention internal parameters, tools, or system logic.
 
@@ -87,7 +91,22 @@ Rules:
 - Suggest what the user can try next
 - Be calm and friendly
 `;
-  }                                                                                                                
+  }
+  
+  else if (mode === "conflict") {
+    prompt = `
+You are a senior developer helping resolve a git merge conflict.
+The user tried to save a file, but it changed on the server.
+
+Action: ${action}
+Conflict Details: ${JSON.stringify(toolResult)}
+
+Instructions:
+- Explain that a conflict occurred.
+- Briefly summarize the difference between the "Local" version and the "Incoming" version.
+- Ask the user if they want to overwrite, keep local, or if they'd like you to try merging the changes.
+`;
+  }
 
   // 🔵 Normal action result (Git, etc.)
   else {
@@ -109,6 +128,8 @@ Rules:
 - Respond clearly and naturally
 - Confirm the result
 - Do NOT ask follow-up questions
+- If a branch was created, mention the source it was branched from.
+- If a branch was switched, confirm the new active branch.
 `;
   }
   

@@ -62,3 +62,95 @@ export async function renameRepo(token, owner, oldName, newName) {
 
   return response.json();
 }
+
+/**
+ * Service to create a new branch from a source (defaults to main)
+ */
+export async function createBranch(token, owner, repo, branchName, source = "main") {
+    // 1. Get the SHA of the source branch
+    const refResponse = await fetch(
+        `https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${source}`,
+        {
+            headers: {
+                Authorization: `Bearer ${token}`,
+                "Accept": "application/vnd.github.v3+json"
+            }
+        }
+    );
+
+    if (!refResponse.ok) {
+        throw new Error(`Source branch '${source}' not found.`);
+    }
+
+    const refData = await refResponse.json();
+    const sha = refData.object.sha;
+
+    // 2. Create the new reference
+    const response = await fetch(
+        `https://api.github.com/repos/${owner}/${repo}/git/refs`,
+        {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${token}`,
+                "Accept": "application/vnd.github.v3+json",
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                ref: `refs/heads/${branchName}`,
+                sha: sha
+            })
+        }
+    );
+
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.message || "Failed to create branch");
+    }
+
+    return await response.json();
+}
+
+/**
+ * Service to list all branches in a repository
+ */
+export async function listBranches(token, owner, repo) {
+    const response = await fetch(
+        `https://api.github.com/repos/${owner}/${repo}/branches`,
+        {
+            headers: {
+                Authorization: `Bearer ${token}`,
+                "Accept": "application/vnd.github.v3+json"
+            }
+        }
+    );
+
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.message || "Failed to list branches");
+    }
+
+    return await response.json();
+}
+
+/**
+ * Service to delete a branch
+ */
+export async function deleteBranch(token, owner, repo, branchName) {
+    const response = await fetch(
+        `https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${branchName}`,
+        {
+            method: "DELETE",
+            headers: {
+                Authorization: `Bearer ${token}`,
+                "Accept": "application/vnd.github.v3+json"
+            }
+        }
+    );
+
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.message || "Failed to delete branch");
+    }
+
+    return { success: true };
+}

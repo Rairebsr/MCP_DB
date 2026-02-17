@@ -26,6 +26,9 @@ GitHub actions:
 - repo_exists
 - list_github_repos
 - update_repo
+- create_branch
+- list_branch
+- switch_branch
 
 File actions:
 - list_files
@@ -109,6 +112,25 @@ STRICT CONSTRAINTS:
 - If no repository name is present, OMIT the "name" field
 - Extract ONLY parameters explicitly mentioned
 
+──────────────── BRANCH RULES ────────────────
+- create_branch: Use ONLY when the user wants to make a NEW branch that doesn't exist yet.
+  (Keywords: "create", "make", "new", "start")
+
+- switch_branch: Use ONLY when the user wants to move the editor to an ALREADY EXISTING branch.
+  (Keywords: "switch to", "checkout", "use", "move to", "change to")
+
+- list_branches: Use when the user wants to see what branches are available.
+
+──────────────── BRANCH EXAMPLES ────────────────
+User: "I want a new branch called dev"
+Output: { "action": "create_branch", "parameters": { "name": "dev" } }
+
+User: "switch the sample repo to the work branch"
+Output: { "action": "switch_branch", "parameters": { "repo": "sample", "name": "work" } }
+
+User: "checkout main"
+Output: { "action": "switch_branch", "parameters": { "name": "main" } }
+
 ──────── CONTEXT REFERENCE RULE ────────
 
 If the user refers to a repository using phrases like:
@@ -125,7 +147,7 @@ THEN:
 - Reuse that repository name
 - Treat it as if the user explicitly mentioned the name
 
-This rule ONLY applies to update_repo.
+"This rule applies to update_repo, switch_branch, and list_branches."
 Do NOT apply it to create_repo or rename_repo.
 
 

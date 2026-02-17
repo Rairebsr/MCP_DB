@@ -1,6 +1,6 @@
 import Repo from "../models/Repo.js";
 import Workspace from "../models/Workspace.js";
-import { createRepo, renameRepo, deleteRepo,listRepos,getRepoDetails,repoExists,updateRepo} from "../services/github.service.js";
+import { createRepo, renameRepo, deleteRepo,listRepos,getRepoDetails,repoExists,updateRepo,createBranch,ensureRepoInitialized,listBranches} from "../services/github.service.js";
 import express from 'express'
 
 
@@ -280,5 +280,122 @@ router.post("/get-repo-details", async (req, res, next) => {
     next(err);
   }
 });
+
+//branch routes
+
+// 🚀 Create Branch Route
+router.post("/create-branch", async (req, res, next) => {
+  try {
+    const { repo: repoName, name: branchName, source = "main" } = req.body;
+    const token = req.headers["x-github-token"];
+
+    if (!token) return res.status(401).json({ error: "Missing GitHub token" });
+
+    // 1️⃣ Get dynamic owner
+    const owner = await getGitHubUsername(token);
+
+    // 🛡️ THE SAFETY CHECK: Ensure there is at least one commit
+    const isReady = await ensureRepoInitialized(token, owner, repoName);
+    
+    if (!isReady) {
+        throw new Error("Could not initialize repository. Please add a file manually first.");
+    }
+
+    // 2️⃣ Call GitHub Service to create the branch
+    
+    const githubBranch = await createBranch(token, owner, repoName, branchName, source);
+
+    // 3️⃣ Update MongoDB to track the new branch and current state
+    const workspace = await Workspace.findOne({ userId: req.userId });
+    
+    if (workspace) {
+      const updatedRepo = await Repo.findOneAndUpdate(
+        { 
+          workspaceId: workspace._id, 
+          url: new RegExp(repoName, 'i') 
+        },
+        { 
+          $addToSet: { branches: branchName }, // Add to list of known branches
+          currentBranch: branchName           // Switch active branch context
+        },
+        { new: true }
+      );
+
+      if (!updatedRepo) {
+        console.warn(`Branch created on GitHub but Repo doc not found for: ${repoName}`);
+      }
+    }
+
+    // 4️⃣ Respond to orchestrator
+    res.json({
+      success: true,
+      repo: repoName,
+      branch: branchName,
+      source: source,
+      ref: githubBranch.ref
+    });
+
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/list-branches/:repo", async (req, res, next) => {
+    try {
+        const { repo } = req.params;
+        const token = req.headers["x-github-token"];
+        const owner = await getGitHubUsername(token);
+
+        const branches = await listBranches(token, owner, repo);
+        
+        // Return just the names for the AI to read easily
+        res.json({ success: true, branches: branches.map(b => b.name) });
+    } catch (err) {
+        next(err);
+    }
+});
+
+router.post("/switch-branch", async (req, res, next) => {
+    try {
+        const { repo: repoName, name: branchName } = req.body;
+        const token = req.headers["x-github-token"];
+        
+        // 1. Try DB first (Fast)
+        let repoDoc = await Repo.findOne({ name: new RegExp(`^${repoName}$`, 'i') });
+
+        // 2. If missing, don't throw an error! Check GitHub (Self-Healing)
+        if (!repoDoc) {
+            console.log(`🔍 Repo ${repoName} not in DB. Discovering...`);
+            const owner = await getGitHubUsername(token); // Your helper
+            
+            const gitRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}`, {
+                headers: { Authorization: `token ${token}` }
+            });
+
+            if (gitRes.ok) {
+                const gData = await gitRes.json();
+                // 3. Automatically "Learn" the new repo
+                repoDoc = await Repo.create({
+                    workspaceId: req.workspaceId, // From your session/auth
+                    name: gData.name,
+                    url: gData.html_url,
+                    currentBranch: gData.default_branch,
+                    cloned: false // Mark for later cloning
+                });
+            }
+        }
+
+        if (!repoDoc) throw new Error("Repository not found anywhere.");
+
+        // 4. Update state
+        repoDoc.currentBranch = branchName;
+        await repoDoc.save();
+
+        res.json({ success: true, message: `Switched to ${branchName}` });
+    } catch (err) {
+        next(err);
+    }
+});
+
 
 export default router;

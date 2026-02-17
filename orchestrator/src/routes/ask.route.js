@@ -14,10 +14,6 @@ function normalizeRepoName(name = "") {
     .replace(/[^a-z0-9-_]/g, "");
 }
 
-function missingCreateRepoParams(params = {}) {
-  return !params.name;
-}
-
 
 router.post("/", async (req, res) => {
     console.log("---- /ask HIT ----");
@@ -574,6 +570,93 @@ if (resolvedAction === "upload_file") {
 
   return res.json({ success: true, aiResponse: aiText });
 }
+
+ //BRANCH ACTION
+
+if (resolvedAction === "create_branch") {
+    const repo = req.body.repo ?? parameters.repo;
+    const branchName = req.body.name ?? parameters.name;
+    const source = req.body.source ?? parameters.source ?? "main";
+
+    // 🔴 Clarification
+    if (!repo || !branchName) {
+      const aiText = await generateResponse({
+        mode: "clarification",
+        action: "create_branch",
+        missing: [!repo && "repository name", !branchName && "new branch name"].filter(Boolean)
+      });
+      return res.json({ success: false, needsInput: true, aiResponse: aiText, pendingAction: "create_branch" });
+    }
+
+  // 🟢 Execute
+    const response = await fetch("http://localhost:5000/api/actions/create-branch", {
+      method: "POST",
+      headers: backendHeaders,
+      body: JSON.stringify({ repo, name: branchName, source })
+    });
+
+    const result = await response.json();
+    
+    if (!response.ok) throw new Error(result.error || "Branch creation failed");
+
+    const aiText = await generateResponse({
+      mode: "action",
+      action: "create_branch",
+      toolResult: result
+    });
+
+    return res.json({ success: true, aiResponse: aiText });
+  }
+
+  // 🌿 LIST BRANCHES
+    if (resolvedAction === "list_branch") {
+      const repo = req.body.repo ?? parameters.repo;
+
+      if (!repo) {
+        const aiText = await generateResponse({ mode: "clarification", action: "list_branch", missing: ["repo name"] });
+        return res.json({ success: false, needsInput: true, aiResponse: aiText, pendingAction: "list_branch" });
+      }
+
+      const response = await fetch(`http://localhost:5000/api/actions/list-branches/${repo}`, {
+        method: "GET",
+        headers: backendHeaders
+      });
+
+      const result = await response.json();
+      const aiText = await generateResponse({
+        mode: "action",
+        action: "list_branch",
+        toolResult: result.branches 
+      });
+
+      return res.json({ success: true, aiResponse: aiText });
+    }
+
+// 🔄 SWITCH BRANCH
+    if (resolvedAction === "switch_branch") {
+      const repo = req.body.repo ?? parameters.repo;
+      const branchName = req.body.name ?? parameters.name;
+
+      if (!repo || !branchName) {
+        const aiText = await generateResponse({ mode: "clarification", action: "switch_branch", missing: [!repo && "repo", !branchName && "branch name"].filter(Boolean) });
+        return res.json({ success: false, needsInput: true, aiResponse: aiText, pendingAction: "switch_branch" });
+      }
+
+      const response = await fetch("http://localhost:5000/api/actions/switch-branch", {
+        method: "POST",
+        headers: backendHeaders,
+        body: JSON.stringify({ repo, name: branchName })
+      });
+
+      const result = await response.json();
+      const aiText = await generateResponse({
+        mode: "action",
+        action: "switch_branch",
+        toolResult: result
+      });
+
+      return res.json({ success: true, aiResponse: aiText });
+    }
  
     return res.status(400).json({
       success: false,

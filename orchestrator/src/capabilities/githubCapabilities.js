@@ -44,5 +44,19 @@ export const githubCapabilities = {
   latest_repo: {
     description: "Get the most recently updated repository",
     parameters: []
+  },
+
+  create_branch: {
+    description: "Create a new branch in a repository",
+    parameters: ["repo", "name", "source"] // source is optional (defaults to main)
+  },
+  list_branch: {
+    description: "List all branches in a repository",
+    parameters: ["repo"]
+  },
+  switch_branch: {
+    description: "Switch the active branch for a repository",
+    parameters: ["repo", "name"]
   }
+
 };

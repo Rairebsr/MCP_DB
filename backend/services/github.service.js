@@ -176,3 +176,81 @@ export async function repoExists(token, owner, repoName) {
 
   return response.status === 200;
 }
+
+//---------------BRANCH ACTION BEGINS-------------
+
+
+
+export async function ensureRepoInitialized(token, owner, repo) {
+    try {
+        // Check if main exists
+        const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/branches/main`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+
+        if (res.ok) return true; // Branch exists, we are good!
+
+        // If not found, create an initial README.md to initialize the repo
+        console.log("Repo empty. Initializing with README.md...");
+        const initRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/README.md`, {
+            method: "PUT",
+            headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                message: "Initial commit",
+                content: Buffer.from(`# ${repo}\nRepository initialized by AI Agent.`).toString("base64")
+            })
+        });
+
+        return initRes.ok;
+    } catch (err) {
+        console.error("Initialization check failed:", err);
+        return false;
+    }
+}
+
+export async function createBranch(token, owner, repo, branchName, source = "main") {
+  // 1. Get the SHA of the source branch
+  const refRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${source}`, {
+    headers: { Authorization: `token ${token}` }
+  });
+  
+  if (!refRes.ok) throw new Error(`Source branch ${source} not found.`);
+  const refData = await refRes.json();
+  const sha = refData.object.sha;
+
+  // 2. Create the new branch using that SHA
+  const createRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/refs`, {
+    method: "POST",
+    headers: { 
+      Authorization: `token ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      ref: `refs/heads/${branchName}`,
+      sha: sha
+    })
+  });
+
+  if (!createRes.ok) {
+    const error = await createRes.json();
+    throw new Error(error.message || "Failed to create branch");
+  }
+
+  return await createRes.json();
+}
+
+export async function listBranches(token, owner, repo) {
+    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/branches`, {
+        headers: {
+            Authorization: `token ${token}`,
+            "Accept": "application/vnd.github.v3+json"
+        }
+    });
+
+    if (!response.ok) throw new Error("Failed to fetch branches from GitHub");
+    return await response.json();
+}
+
