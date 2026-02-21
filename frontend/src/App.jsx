@@ -479,33 +479,61 @@ const startRequest = () => ({
   setInputValue("");
 
   try {
-    let payload;
+        let payload;
 
-    // 🧠 ALWAYS USE ROUTER MODE (Allow context switching)
-    const chatHistory = messages
-      .slice(-4)
-      .map(m => ({
-        role: m.type === "user" ? "user" : "assistant",
-        content: typeof m.content === "string"
-          ? m.content
-          : JSON.stringify(m.content)
-      }));
+        // 🛑 HARD COMMAND INTERCEPTOR: Bypass AI hallucination for branching & pushing
+        const lowerInput = currentInput.toLowerCase();
+        
+        if (lowerInput.includes("branch")) {
+          // 🧠 UPGRADED REGEX: Safely ignores "to", "named", and "called"
+          const branchMatch = currentInput.match(/branch\s+(?:named\s+|called\s+|to\s+)?([^\s]+)/i);
+          
+          if (branchMatch) {
+            payload = {
+              action: "switch_branch",
+              parameters: { branch: branchMatch[1] }
+            };
+            const repoMatch = currentInput.match(/in (?:the )?([^\s]+)/i);
+            if (repoMatch) payload.parameters.name = repoMatch[1];
+          }
+        } else if (lowerInput.startsWith("push") || lowerInput.includes("push changes")) {
+          // Instantly lock in the push command without asking the AI
+          payload = {
+            action: "push_repo",
+            parameters: {}
+          };
+          const repoMatch = currentInput.match(/in (?:the )?([^\s]+)/i);
+          if (repoMatch) payload.parameters.name = repoMatch[1];
+        }
 
-    const routerResponse = await askPuter(currentInput, chatHistory, "router");
+        // Only ask the AI Router if we haven't manually intercepted the command
+        if (!payload) {
+          // 🧠 ALWAYS USE ROUTER MODE (Allow context switching)
+          const chatHistory = messages
+            .slice(-4)
+            .map(m => ({
+              role: m.type === "user" ? "user" : "assistant",
+              content: typeof m.content === "string"
+                ? m.content
+                : JSON.stringify(m.content)
+            }));
 
-    try {
-      payload = JSON.parse(routerResponse);
-    } catch {
-      // fallback: router responded with text
-      setMessages(prev => [...prev, {
-        id: Date.now(),
-        type: "assistant",
-        content: routerResponse,
-        timestamp: new Date()
-      }]);
-      setIsProcessing(false);
-      return;
-    }
+          const routerResponse = await askPuter(currentInput, chatHistory, "router");
+
+          try {
+            payload = JSON.parse(routerResponse);
+          } catch {
+            // fallback: router responded with text
+            setMessages(prev => [...prev, {
+              id: Date.now(),
+              type: "assistant",
+              content: routerResponse,
+              timestamp: new Date()
+            }]);
+            setIsProcessing(false);
+            return;
+          }
+        }
 
     // 🔄 SMART CONTEXT MERGING
     // If the router didn't recognize a new command (action is null) but we have a pending action,
@@ -554,8 +582,9 @@ const startRequest = () => ({
         return; // Halt here so we don't hit the backend with an undefined action
       }
     }
+    
     // 🎯 NEW: Auto-Inject Active Repository for Git operations
-    if (payload.action === "push_repo" || payload.action === "clone_repo") {
+    if (payload.action === "push_repo" || payload.action === "clone_repo" || payload.action === "switch_branch") {
       payload.parameters = payload.parameters || {};
       
       // If the AI didn't specify a repo name, but we have a file open in the editor...

@@ -149,7 +149,11 @@ Do NOT apply it to create_repo or rename_repo.
 - Extract the repository name as "name" (e.g., "push group13_project" -> name: "group13_project").
 - Extract the commit message as "message" if the user provides one (e.g., "push with message 'fixed typo'").
 - CONVERSATION CONTEXT: If the user replies with just a repository name (e.g., "group13_project") and the conversation history shows the assistant just asked which repository to push to, you MUST output action "push_repo" and extract that "name".
+──────────────── SWITCH_BRANCH RULES ────────────────
 
+- Used when the user wants to create, switch, or checkout a branch.
+- Extract the target branch name as "branch" (e.g., "create branch feature-ui" -> branch: "feature-ui").
+- Extract the repository name as "name" if explicitly mentioned.
 ──────────────── FILE RULES ────────────────
 
 list_files:

@@ -9,7 +9,7 @@ import { generateResponse } from "../services/geminiService.js";
 
 // External Backend Imports (Going up 3 levels: routes -> src -> orchestrator -> ROOT -> backend)
 import { listRepos } from "../../../backend/services/github.service.js";
-import { cloneRepo, ensureGitIdentity, smartPush } from "../../../backend/services/git.service.js";
+import { cloneRepo, ensureGitIdentity, smartPush,switchBranch } from "../../../backend/services/git.service.js";
 import Repo from "../../../backend/models/Repo.js";
 import PendingAction from "../../../backend/models/PendingAction.js"; 
 import Workspace from "../../../backend/models/Workspace.js";
@@ -425,7 +425,73 @@ router.post("/", async (req, res) => {
         aiResponse: `⚠️ **HUMAN-IN-THE-LOOP AUTHORIZATION REQUIRED:**\n\nAre you absolutely sure you want to permanently delete the repository **\`${repoName}\`** from GitHub AND your local hard drive? This action cannot be undone.\n\nReply **"yes"** to confirm or **"no"** to cancel.` 
       });
     }
+    // ------------------------------------------------------------------
+    // 9️⃣ SWITCH / CREATE BRANCH
+    // ------------------------------------------------------------------
+    if (resolvedAction === "switch_branch") {
+      const branchName = req.body.parameters?.branch;
+      let repoName = req.body.name ?? parameters.name ?? parameters.repository;
 
+      if (!branchName) {
+        const aiText = await generateResponse({ mode: "clarification", action: "switch_branch", missing: ["branch name"] });
+        return res.json({ success: false, needsInput: true, pendingAction: "switch_branch", aiResponse: aiText });
+      }
+
+      const workspace = await Workspace.findOne({ userId: req.userId });
+      const ROOT_WORKSPACE = path.resolve(process.cwd(), "..", "mcp_workspace");
+      let targetRepoPath = null;
+      let targetRepoId = null;
+
+      // 🧠 Smart Repository Detection (Matches push_repo logic)
+      if (workspace) {
+         if (repoName) {
+             const normalizeForSearch = (str) => str ? str.toLowerCase().replace(/[-_\s]/g, "") : "";
+             const searchName = normalizeForSearch(repoName);
+             const allRepos = await Repo.find({ workspaceId: workspace._id });
+             const foundRepo = allRepos.find(r => normalizeForSearch(r.localPath).includes(searchName));
+             
+             if (foundRepo) {
+                 // Found in Database
+                 targetRepoPath = foundRepo.localPath;
+                 targetRepoId = foundRepo._id;
+             } else {
+                 // 🟢 NEW: File System Fallback (For manually created/untracked repos like goback_N!)
+                 try {
+                     const possiblePath = path.resolve(ROOT_WORKSPACE, repoName);
+                     await fs.access(path.join(possiblePath, ".git")); // Verify it's a real git repo
+                     targetRepoPath = possiblePath;
+                 } catch (e) {
+                     // Folder doesn't exist or isn't a git repo
+                 }
+             }
+         } else if (workspace.activeRepoId) {
+             const activeRepo = await Repo.findById(workspace.activeRepoId);
+             if (activeRepo) {
+                 targetRepoPath = activeRepo.localPath;
+                 targetRepoId = activeRepo._id;
+             }
+         }
+      }
+
+      if (!targetRepoPath) {
+          return res.json({ success: false, error: "No active repository context. Please open a file in the editor first, or explicitly state the repository name." });
+      }
+
+      const result = await switchBranch(targetRepoPath, branchName);
+
+      // Update DB with the new active branch (Only if it's a tracked repo)
+      if (targetRepoId) {
+          await Repo.findByIdAndUpdate(targetRepoId, { branch: branchName });
+      }
+
+      const aiText = await generateResponse({
+        mode: "action",
+        action: "switch_branch",
+        toolResult: { status: `Successfully switched to branch: ${branchName} in ${targetRepoPath.split(/[\\/]/).pop()}` }
+      });
+
+      return res.json({ success: true, aiResponse: aiText });
+    }
     // ------------------------------------------------------------------
     // 8️⃣ FILE OPERATIONS
     // ------------------------------------------------------------------

@@ -64,6 +64,10 @@ push_repo: {
 git_status: {
   description: "Check git status of a repository",
   parameters: ["repo_path"]
-}
+},
+switch_branch: {
+    description: "Create a new branch or switch to an existing one",
+    parameters: ["branch"]
+  }
 
 };

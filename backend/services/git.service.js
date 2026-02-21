@@ -57,13 +57,7 @@ export async function ensureGitIdentity(workspacePath) {
   }
 }
 
-/**
- * 2. The Smart Push (Add -> Commit -> Pull --rebase -> Push)
- * Returns the new commit hash for DB synchronization.
- */
-/**
- * 2. The Smart Push (Dynamic Branch Detection)
- */
+
 /**
  * 2. The Smart Push (Dynamic Branch Detection & Rebase Recovery)
  */
@@ -134,5 +128,26 @@ export async function smartPush(workspacePath, message) {
     }
     
     throw error;
+  }
+}
+/**
+ * 3. Switch or Create Branch
+ */
+export async function switchBranch(workspacePath, branchName) {
+  const git = getGit(workspacePath);
+  try {
+    const branchSummary = await git.branch();
+    const hasLocal = branchSummary.all.includes(branchName);
+
+    // If it exists, check it out. If not, create and check it out (git checkout -b)
+    if (hasLocal) {
+      await git.checkout(branchName);
+    } else {
+      await git.checkoutLocalBranch(branchName); 
+    }
+    
+    return { success: true, branch: branchName };
+  } catch (err) {
+    throw new Error(`Failed to switch branch: ${err.message}`);
   }
 }
