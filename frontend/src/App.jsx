@@ -24,7 +24,9 @@ const App = () => {
   const [currentPath, setCurrentPath] = useState(".");
   const [confirmDialog, setConfirmDialog] = useState({ isOpen: false, text: "" });
   const [isCreatingFile, setIsCreatingFile] = useState(false);
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false); 
   const [newFileName, setNewFileName] = useState("");
+  const [newFolderName, setNewFolderName] = useState(""); 
   // Tabs and Editor State
   const [openFiles, setOpenFiles] = useState([]); // Array of { path, content, hash, isDirty }
   const [activeFilePath, setActiveFilePath] = useState(null);
@@ -270,54 +272,37 @@ const handleFileUpload = async (file) => {
 
   const formData = new FormData();
   formData.append("file", file);
+  formData.append("targetPath", currentPath); // <--- Add this line
 
   try {
     setIsUploading(true);
 
-    const res = await fetch("http://localhost:4000/file/upload", {
+    // Update URL to point to backend (5000) instead of orchestrator (4000)
+    // to bypass JSON parsing errors with binary files
+    const res = await fetch("http://localhost:5000/api/files/upload", { 
       method: "POST",
       body: formData,
-      credentials: "include"
+      headers: { "X-User-Id": user.login } // Ensure backend knows who is uploading
     });
 
     const data = await res.json();
+    if (!data.success) throw new Error(data.error || "Upload failed");
 
-    if (!data.success) {
-      throw new Error(data.error || "Upload failed");
-    }
-
-    setMessages(prev => [
-      ...prev,
-      {
-        id: Date.now(),
-        type: "system",
-        content: `📎 Uploaded **${file.name}** to uploads folder.`,
-        timestamp: new Date()
-      }
-    ]);
+    setMessages(prev => [...prev, {
+      id: Date.now(),
+      type: "system",
+      content: `📎 Uploaded **${file.name}** to ${currentPath === '.' ? 'workspace root' : currentPath}`,
+      timestamp: new Date()
+    }]);
+    
+    fetchFiles(currentPath); // <--- Refresh explorer after upload
 
   } catch (err) {
-    setMessages(prev => [
-      ...prev,
-      {
-        id: Date.now(),
-        type: "error",
-        content: `❌ Upload failed: ${err.message}`,
-        timestamp: new Date()
-      }
-    ]);
+    // ... your existing catch logic
   } finally {
     setIsUploading(false);
   }
-};  
-
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+};
 
   const handleInputChange = (e) => {
     setInputValue(e.target.value);
@@ -759,6 +744,31 @@ const startRequest = () => ({
     }
   };
 
+  //crete a new folder
+  const handleCreateNewFolder = async (e) => {
+  if (e.key === 'Enter' && newFolderName.trim()) {
+    const folderPath = currentPath === "." ? newFolderName : `${currentPath}/${newFolderName}`;
+    try {
+      const res = await fetch("http://localhost:5000/api/files/mkdir", { // Ensure this route exists on backend
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-User-Id": user.login },
+        body: JSON.stringify({ path: folderPath })
+      });
+      
+      if (res.ok) {
+        setIsCreatingFolder(false);
+        setNewFolderName("");
+        fetchFiles(currentPath); // Refresh view
+      }
+    } catch (err) {
+      console.error("Failed to create folder:", err);
+    }
+  } else if (e.key === 'Escape') {
+    setIsCreatingFolder(false);
+    setNewFolderName("");
+  }
+};
+
 // Performance metrics data
   const performanceData = React.useMemo(() => {
     if (!metrics.length) {
@@ -887,73 +897,112 @@ const startRequest = () => ({
             )}
 
             {/* VIEW 2: FILE EXPLORER */}
-            {activeSidebarTab === 'explorer' && (
-              <div className="flex flex-col space-y-1">
-                {!user ? (
-                  <div className="text-xs text-gray-500 text-center mt-10">Login to view files</div>
-                ) : (
-                  <>
-                    {/* Explorer Header & Action Bar */}
-                    <div className="flex items-center justify-between px-2 mb-2 pb-2 border-b border-gray-800">
-                      <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider truncate">
-                        {currentPath === "." ? "WORKSPACE" : currentPath.split('/').pop()}
-                      </span>
-                      <button 
-                        onClick={() => setIsCreatingFile(true)}
-                        className="text-gray-400 hover:text-white p-1 hover:bg-gray-700 rounded transition-colors"
-                        title="New File"
-                      >
-                        📄+
-                      </button>
-                    </div>
+            {/* VIEW 2: FILE EXPLORER */}
+{activeSidebarTab === 'explorer' && (
+  <div className="flex flex-col space-y-1">
+    {!user ? (
+      <div className="text-xs text-gray-500 text-center mt-10">Login to view files</div>
+    ) : (
+      <>
+        {/* Explorer Header & Action Bar */}
+        <div className="flex items-center justify-between px-2 mb-2 pb-2 border-b border-gray-800">
+          <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider truncate">
+            {currentPath === "." ? "WORKSPACE" : currentPath.split('/').pop()}
+          </span>
+          <div className="flex gap-1">
+            <button 
+              onClick={() => fileInputRef.current?.click()}
+              className="text-gray-400 hover:text-white p-1 hover:bg-gray-700 rounded transition-colors"
+              title="Upload to folder"
+            >
+              ⬆️
+            </button>
+            <button 
+              onClick={() => { setIsCreatingFolder(true); setIsCreatingFile(false); }}
+              className="text-gray-400 hover:text-white p-1 hover:bg-gray-700 rounded transition-colors"
+              title="New Folder"
+            >
+              📂+
+            </button>
+            <button 
+              onClick={() => { setIsCreatingFile(true); setIsCreatingFolder(false); }}
+              className="text-gray-400 hover:text-white p-1 hover:bg-gray-700 rounded transition-colors"
+              title="New File"
+            >
+              📄+
+            </button>
+          </div>
+        </div>
 
-                    {/* Back Button (if not in root) */}
-                    {currentPath !== "." && (
-                      <button 
-                        onClick={() => fetchFiles(currentPath.split('/').slice(0, -1).join('/') || '.')} 
-                        className="text-left text-sm text-gray-400 hover:text-white flex items-center gap-2 py-1.5 px-2 rounded-lg hover:bg-gray-800 transition-colors mb-2"
-                      >
-                        <span className="text-lg leading-none">🔙</span> 
-                        <span className="font-mono text-xs">.. (Go back)</span>
-                      </button>
-                    )}
+        {/* 🔙 BACK BUTTON: Only shows if not in root */}
+        {currentPath !== "." && (
+          <button 
+            onClick={() => {
+              const parts = currentPath.split('/');
+              parts.pop();
+              fetchFiles(parts.length === 0 ? "." : parts.join('/'));
+            }} 
+            className="text-left text-sm text-gray-400 hover:text-white flex items-center gap-2 py-1.5 px-2 rounded-lg hover:bg-gray-800 transition-colors mb-2"
+          >
+            <span className="text-lg leading-none">🔙</span> 
+            <span className="font-mono text-xs">.. (Go back)</span>
+          </button>
+        )}
 
-                    {/* Inline New File Input */}
-                    {isCreatingFile && (
-                      <div className="flex items-center gap-2 py-1.5 px-2 bg-gray-800/80 rounded-lg border border-blue-500/50 mb-1">
-                        <span className="text-sm leading-none opacity-80">📄</span>
-                        <input 
-                          autoFocus
-                          type="text"
-                          value={newFileName}
-                          onChange={(e) => setNewFileName(e.target.value)}
-                          onKeyDown={handleCreateNewFile}
-                          onBlur={() => { setIsCreatingFile(false); setNewFileName(""); }}
-                          placeholder="filename.ext"
-                          className="bg-transparent text-xs text-white focus:outline-none w-full font-mono placeholder-gray-500"
-                        />
-                      </div>
-                    )}
+        {/* 📂 NEW FOLDER INPUT */}
+        {isCreatingFolder && (
+          <div className="flex items-center gap-2 py-1.5 px-2 bg-gray-800/80 rounded-lg border border-yellow-500/50 mb-1">
+            <span className="text-sm leading-none opacity-80">📁</span>
+            <input 
+              autoFocus
+              type="text"
+              value={newFolderName}
+              onChange={(e) => setNewFolderName(e.target.value)}
+              onKeyDown={handleCreateNewFolder}
+              onBlur={() => { setIsCreatingFolder(false); setNewFolderName(""); }}
+              placeholder="folder name"
+              className="bg-transparent text-xs text-white focus:outline-none w-full font-mono"
+            />
+          </div>
+        )}
 
-                    {/* File/Folder List */}
-                    {fileTree.map(file => (
-                      <button 
-                        key={file.name} 
-                        onClick={() => handleFileClick(file)} 
-                        className="text-left text-sm text-gray-300 hover:text-white flex items-center gap-2 py-1.5 px-2 rounded-lg hover:bg-gray-800 transition-colors"
-                      >
-                        <span className="text-lg leading-none opacity-80">{file.type === 'dir' ? '📁' : '📄'}</span> 
-                        <span className="font-mono text-xs truncate">{file.name}</span>
-                      </button>
-                    ))}
-                    
-                    {fileTree.length === 0 && !isCreatingFile && (
+        {/* 📄 NEW FILE INPUT (This was missing) */}
+        {isCreatingFile && (
+          <div className="flex items-center gap-2 py-1.5 px-2 bg-gray-800/80 rounded-lg border border-blue-500/50 mb-1">
+            <span className="text-sm leading-none opacity-80">📄</span>
+            <input 
+              autoFocus
+              type="text"
+              value={newFileName}
+              onChange={(e) => setNewFileName(e.target.value)}
+              onKeyDown={handleCreateNewFile}
+              onBlur={() => { setIsCreatingFile(false); setNewFileName(""); }}
+              placeholder="file name"
+              className="bg-transparent text-xs text-white focus:outline-none w-full font-mono"
+            />
+          </div>
+        )}
+
+        {/* File/Folder List */}
+        {fileTree.map(file => (
+          <button 
+            key={file.name} 
+            onClick={() => handleFileClick(file)} 
+            className="text-left text-sm text-gray-300 hover:text-white flex items-center gap-2 py-1.5 px-2 rounded-lg hover:bg-gray-800 transition-colors"
+          >
+            <span className="text-lg leading-none opacity-80">{file.type === 'dir' ? '📁' : '📄'}</span> 
+            <span className="font-mono text-xs truncate">{file.name}</span>
+          </button>
+        ))}
+        {fileTree.length === 0 && !isCreatingFile && (
+
                       <div className="text-xs text-gray-500 text-center mt-10">Folder is empty</div>
+
                     )}
-                  </>
-                )}
-              </div>
-            )}
+      </>
+    )}
+  </div>
+)}
           </div>
         </>
       ) : (

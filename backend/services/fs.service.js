@@ -8,6 +8,15 @@ const WORKSPACE = path.resolve(process.cwd(), "..", "mcp_workspace");
 
 const getHash = (content) => crypto.createHash('sha256').update(content).digest('hex');
 
+// Add this inside fs.service.js if it's missing
+function resolveSafePath(relativePath) {
+  const resolved = path.resolve(WORKSPACE, relativePath);
+  if (!resolved.startsWith(WORKSPACE)) {
+    throw new Error("Invalid file path");
+  }
+  return resolved;
+}
+
 // WRITE + CONFLICT CHECK
 export const writeFileAndSync = async (workspaceId, relativePath, content, incomingHash) => {
   const fullPath = path.resolve(WORKSPACE, relativePath);
@@ -115,15 +124,19 @@ export async function readFileAndSync(workspaceId, relativePath) {
   return { content, doc };
 }
 
-// 3. Upload File (Base64)
-export async function uploadFileAndSync(workspaceId, filename, contentBase64) {
-  const uploadDir = path.resolve(WORKSPACE, "uploads");
-  await fs.mkdir(uploadDir, { recursive: true });
+// backend/services/fs.service.js
+export async function uploadFileAndSync(workspaceId, filename, contentBase64, subFolder = ".") {
+  // 1. Resolve the path based on the folder the user is in
+  const targetDir = resolveSafePath(subFolder);
+  
+  // 2. Ensure that specific folder exists on disk
+  await fs.mkdir(targetDir, { recursive: true });
 
-  const relativePath = path.join("uploads", filename);
-  const filePath = path.resolve(WORKSPACE, relativePath);
+  // 3. Define the physical and relative paths
+  const relativePath = path.join(subFolder, filename);
+  const filePath = path.join(targetDir, filename);
+  
   const buffer = Buffer.from(contentBase64, "base64");
-
   await fs.writeFile(filePath, buffer);
   
   const hash = getHash(buffer);
@@ -134,4 +147,26 @@ export async function uploadFileAndSync(workspaceId, filename, contentBase64) {
   );
 
   return { path: relativePath, bytes: buffer.length, doc };
+}
+
+
+// Add this to your backend/services/fileService.js
+
+// backend/services/fs.service.js
+
+export async function createDirectory(workspaceId, relativePath) {
+  if (!relativePath) {
+    throw new Error("Directory path is required");
+  }
+
+  // Ensure relativePath is used with resolveSafePath
+  // The error happened because path.resolve was likely receiving the workspace object
+  const fullPath = resolveSafePath(relativePath); 
+
+  try {
+    await fs.mkdir(fullPath, { recursive: true });
+    return { success: true, path: relativePath };
+  } catch (err) {
+    throw new Error(`Failed to create directory: ${err.message}`);
+  }
 }
