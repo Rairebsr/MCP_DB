@@ -40,6 +40,10 @@ const App = () => {
 
   const [commitModal, setCommitModal] = useState({ isOpen: false, repoName: null, message: "" });
   const [isGeneratingCommit, setIsGeneratingCommit] = useState(false);
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false); 
+  const [newFolderName, setNewFolderName] = useState(""); 
+
+
   // 1. Open or Focus a File Tab
   // Helper to open editor
   const openInEditor = (path, content, hash) => {
@@ -333,54 +337,37 @@ const handleFileUpload = async (file) => {
 
   const formData = new FormData();
   formData.append("file", file);
+  formData.append("targetPath", currentPath); // <--- Add this line
 
   try {
     setIsUploading(true);
 
-    const res = await fetch("http://localhost:4000/file/upload", {
+    // Update URL to point to backend (5000) instead of orchestrator (4000)
+    // to bypass JSON parsing errors with binary files
+    const res = await fetch("http://localhost:5000/api/files/upload", { 
       method: "POST",
       body: formData,
-      credentials: "include"
+      headers: { "X-User-Id": user.login } // Ensure backend knows who is uploading
     });
 
     const data = await res.json();
+    if (!data.success) throw new Error(data.error || "Upload failed");
 
-    if (!data.success) {
-      throw new Error(data.error || "Upload failed");
-    }
-
-    setMessages(prev => [
-      ...prev,
-      {
-        id: Date.now(),
-        type: "system",
-        content: `📎 Uploaded **${file.name}** to uploads folder.`,
-        timestamp: new Date()
-      }
-    ]);
+    setMessages(prev => [...prev, {
+      id: Date.now(),
+      type: "system",
+      content: `📎 Uploaded **${file.name}** to ${currentPath === '.' ? 'workspace root' : currentPath}`,
+      timestamp: new Date()
+    }]);
+    
+    fetchFiles(currentPath); // <--- Refresh explorer after upload
 
   } catch (err) {
-    setMessages(prev => [
-      ...prev,
-      {
-        id: Date.now(),
-        type: "error",
-        content: `❌ Upload failed: ${err.message}`,
-        timestamp: new Date()
-      }
-    ]);
+    // ... your existing catch logic
   } finally {
     setIsUploading(false);
   }
-};  
-
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+};
 
   const handleInputChange = (e) => {
     setInputValue(e.target.value);
@@ -829,6 +816,31 @@ const startRequest = () => ({
     }
   };
 
+  //crete a new folder
+  const handleCreateNewFolder = async (e) => {
+  if (e.key === 'Enter' && newFolderName.trim()) {
+    const folderPath = currentPath === "." ? newFolderName : `${currentPath}/${newFolderName}`;
+    try {
+      const res = await fetch("http://localhost:5000/api/files/mkdir", { // Ensure this route exists on backend
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-User-Id": user.login },
+        body: JSON.stringify({ path: folderPath })
+      });
+      
+      if (res.ok) {
+        setIsCreatingFolder(false);
+        setNewFolderName("");
+        fetchFiles(currentPath); // Refresh view
+      }
+    } catch (err) {
+      console.error("Failed to create folder:", err);
+    }
+  } else if (e.key === 'Escape') {
+    setIsCreatingFolder(false);
+    setNewFolderName("");
+  }
+};
+
 // Performance metrics data
   const performanceData = React.useMemo(() => {
     if (!metrics.length) {
@@ -1036,7 +1048,7 @@ const startRequest = () => ({
             {/* VIEW 2: FILE EXPLORER */}
             {activeSidebarTab === 'explorer' && (
               <div className="flex flex-col space-y-1">
-                {!user ? (
+                 {!user ? (
                   <div className="text-xs text-gray-500 text-center mt-10">Login to view files</div>
                 ) : (
                   <>
@@ -1045,13 +1057,29 @@ const startRequest = () => ({
                       <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider truncate">
                         {currentPath === "." ? "WORKSPACE" : currentPath.split('/').pop()}
                       </span>
-                      <button 
-                        onClick={() => setIsCreatingFile(true)}
-                        className="text-gray-400 hover:text-white p-1 hover:bg-gray-700 rounded transition-colors"
-                        title="New File"
-                      >
-                        📄+
-                      </button>
+                      <div className="flex gap-1">
+                        <button 
+                          onClick={() => fileInputRef.current?.click()}
+                          className="text-gray-400 hover:text-white p-1 hover:bg-gray-700 rounded transition-colors"
+                          title="Upload to folder"
+                        >
+                          ⬆️
+                        </button>
+                        <button 
+                          onClick={() => { setIsCreatingFolder(true); setIsCreatingFile(false); }}
+                          className="text-gray-400 hover:text-white p-1 hover:bg-gray-700 rounded transition-colors"
+                          title="New Folder"
+                        >
+                          📂+
+                        </button>
+                        <button 
+                          onClick={() => { setIsCreatingFile(true); setIsCreatingFolder(false); }}
+                          className="text-gray-400 hover:text-white p-1 hover:bg-gray-700 rounded transition-colors"
+                          title="New File"
+                        >
+                          📄+
+                        </button>
+                      </div>
                     </div>
 
                     {/* Back Button (if not in root) */}
@@ -1063,6 +1091,22 @@ const startRequest = () => ({
                         <span className="text-lg leading-none">🔙</span> 
                         <span className="font-mono text-xs">.. (Go back)</span>
                       </button>
+                    )}
+                    {/* 📂 NEW FOLDER INPUT */}
+                    {isCreatingFolder && (
+                      <div className="flex items-center gap-2 py-1.5 px-2 bg-gray-800/80 rounded-lg border border-yellow-500/50 mb-1">
+                        <span className="text-sm leading-none opacity-80">📁</span>
+                        <input 
+                          autoFocus
+                          type="text"
+                          value={newFolderName}
+                          onChange={(e) => setNewFolderName(e.target.value)}
+                          onKeyDown={handleCreateNewFolder}
+                          onBlur={() => { setIsCreatingFolder(false); setNewFolderName(""); }}
+                          placeholder="folder name"
+                          className="bg-transparent text-xs text-white focus:outline-none w-full font-mono"
+                        />
+                      </div>
                     )}
 
                     {/* Inline New File Input */}
@@ -1534,6 +1578,12 @@ const startRequest = () => ({
           </div>
         </div>
       )}
+      <input
+  type="file"
+  ref={fileInputRef}
+  className="hidden"
+  onChange={(e) => handleFileUpload(e.target.files[0])}
+/>
 {/* 🛑 GitHub-Style Commit Modal */}
       {commitModal.isOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm">
@@ -1633,24 +1683,24 @@ const startRequest = () => ({
               </button>
               <button 
                 onClick={async () => {
-                   const finalMessage = commitModal.message.trim() || "Update files";
-                   const payload = { action: "push_repo", parameters: { message: finalMessage, name: commitModal.repoName } };
-                   setCommitModal({ isOpen: false, repoName: null, message: "" });
-                   
-                   setIsProcessing(true);
-                   setMessages(prev => [...prev, { id: Date.now(), type: "user", content: "Pushing changes...", timestamp: new Date() }]);
-                   try {
-                     const backendRes = await fetch("http://localhost:4000/ask", {
+                  const finalMessage = commitModal.message.trim() || "Update files";
+                  const payload = { action: "push_repo", parameters: { message: finalMessage, name: commitModal.repoName } };
+                  setCommitModal({ isOpen: false, repoName: null, message: "" });
+                  
+                  setIsProcessing(true);
+                  setMessages(prev => [...prev, { id: Date.now(), type: "user", content: "Pushing changes...", timestamp: new Date() }]);
+                  try {
+                    const backendRes = await fetch("http://localhost:4000/ask", {
                         method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include",
                         body: JSON.stringify(payload)
-                     });
-                     const data = await backendRes.json();
-                     if (data.success) {
+                    });
+                    const data = await backendRes.json();
+                    if (data.success) {
                         setActivityStream(prev => [{ id: Date.now(), action: "push_repo", message: "Successfully pushed changes", timestamp: new Date() }, ...prev]);
-                     }
-                     setMessages(prev => [...prev, { id: Date.now() + 1, type: data.success ? "assistant" : "error", content: data.aiResponse || data.error, timestamp: new Date() }]);
-                   } catch(e) { console.error(e); }
-                   setIsProcessing(false);
+                    }
+                    setMessages(prev => [...prev, { id: Date.now() + 1, type: data.success ? "assistant" : "error", content: data.aiResponse || data.error, timestamp: new Date() }]);
+                  } catch(e) { console.error(e); }
+                  setIsProcessing(false);
                 }}
                 disabled={isProcessing}
                 className="px-3 py-1.5 text-sm font-medium text-white bg-[#238636] border border-[rgba(240,246,252,0.1)] rounded-md hover:bg-[#2ea043] transition-colors"
@@ -1661,6 +1711,7 @@ const startRequest = () => ({
           </div>
         </div>
       )}
+      
     </div>
   );
 };
