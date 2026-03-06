@@ -9,7 +9,7 @@ import { generateResponse } from "../services/geminiService.js";
 
 // External Backend Imports (Going up 3 levels: routes -> src -> orchestrator -> ROOT -> backend)
 import { listRepos } from "../../../backend/services/github.service.js";
-import { cloneRepo, ensureGitIdentity, smartPush,switchBranch } from "../../../backend/services/git.service.js";
+import { cloneRepo, ensureGitIdentity, smartPush, switchBranch, getStagedDiff, getMergeContext } from "../../../backend/services/git.service.js";
 import Repo from "../../../backend/models/Repo.js";
 import PendingAction from "../../../backend/models/PendingAction.js"; 
 import Workspace from "../../../backend/models/Workspace.js";
@@ -171,10 +171,6 @@ router.post("/", async (req, res) => {
 
       return res.json({ success: true, aiResponse: aiText });
     }
-
-    // ------------------------------------------------------------------
-    // 5️⃣ GIT PUSH (DB OPTIMIZED)
-    // ------------------------------------------------------------------
     // ------------------------------------------------------------------
     // 5️⃣ GIT PUSH (DB OPTIMIZED + TYPO IMMUNE)
     // ------------------------------------------------------------------
@@ -254,6 +250,30 @@ router.post("/", async (req, res) => {
       }
 
       await ensureGitIdentity(workspacePath);
+      // 🧠 NEW: Gemini Auto-Commit Generator
+      let finalMessage = message;
+      if (finalMessage.toLowerCase() === "auto") {
+        try {
+          const diff = await getStagedDiff(workspacePath);
+          if (diff && diff.trim().length > 0) {
+            const prompt = `Write a single, concise commit message (max 1 sentence) for these changes. DO NOT use markdown or quotes:\n\n${diff.substring(0, 5000)}`;
+            
+            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+            });
+            const data = await response.json();
+            
+            finalMessage = data.candidates[0].content.parts[0].text.trim().replace(/^"|"$/g, '');
+          } else {
+             finalMessage = "Auto-commit by AI (No diff detected)";
+          }
+        } catch (err) {
+          console.error("AI Commit Failed:", err);
+          finalMessage = "Auto-commit by AI (Generation failed)";
+        }
+      }
       const result = await smartPush(workspacePath, message);
 
       if (!result.success && result.error === "MERGE_CONFLICT") {
@@ -285,7 +305,7 @@ router.post("/", async (req, res) => {
       const aiText = await generateResponse({
         mode: "action",
         action: "push_repo",
-        userInput: `pushed changes with message: "${message}"`,
+        userInput: `pushed changes with message: "${finalMessage}"`,
         toolResult: { status: "Synced with GitHub", branch: result.branch || "main", commit: result.commitHash }
       });
 
@@ -613,7 +633,175 @@ router.post("/", async (req, res) => {
   } catch (err) {
     console.error("Action Error:", err.message);
     const aiText = await generateResponse({ mode: "error", action: resolvedAction, errorMessage: err.message });
-    return res.status(500).json({ success: false, aiResponse: aiText });
+
+    return res.status(500).json({ success: false, error: err.message, aiResponse: aiText });
+
+  }
+});
+
+// ------------------------------------------------------------------
+// 🔟 DIRECT GEMINI CONFLICT RESOLVER
+// ------------------------------------------------------------------
+// ------------------------------------------------------------------
+// 🔟 DIRECT GEMINI CONFLICT RESOLVER (WITH CONTEXT)
+// ------------------------------------------------------------------
+router.post("/resolve-conflict", async (req, res) => {
+  try {
+    const { content, repoName, instructions } = req.body;
+    if (!content) return res.status(400).json({ success: false, error: "No content provided" });
+
+    // 1. Locate the Repository Path to fetch Git History
+    const workspace = await Workspace.findOne({ userId: req.userId });
+    const ROOT_WORKSPACE = path.resolve(process.cwd(), "..", "mcp_workspace");
+    let workspacePath = null;
+    let gitHistory = "No history provided.";
+
+    if (workspace && repoName) {
+        const normalize = (str) => str ? str.toLowerCase().replace(/[-_\s]/g, "") : "";
+        const allRepos = await Repo.find({ workspaceId: workspace._id });
+        const repoDoc = allRepos.find(r => normalize(r.localPath).includes(normalize(repoName)));
+        if (repoDoc) {
+            workspacePath = repoDoc.localPath;
+            // Fetch recent commits for context!
+            gitHistory = await getMergeContext(workspacePath);
+        }
+    }
+
+    // 2. Build the Context-Aware Mega Prompt
+    const prompt = `You are an expert software architect. Resolve the following git merge conflict.
+    
+CONTEXT:
+Here are the recent commit messages leading up to this conflict:
+${gitHistory}
+
+HUMAN INSTRUCTIONS: 
+${instructions || "Intelligently combine the logic if both changes are valuable, or pick the most architecturally sound one."}
+
+CRITICAL INSTRUCTION: RETURN ONLY THE RAW, FINAL RESOLVED CODE. DO NOT wrap it in markdown blocks (no \`\`\`javascript). DO NOT include any explanations or conversational text. 
+
+Conflicted file:
+${content}`;
+
+    // 3. Send to Gemini
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+    });
+    
+    const data = await response.json();
+    
+    // 🚨 Safety Nets to prevent crashes!
+    if (data.error) throw new Error(`Gemini API Error: ${data.error.message}`);
+    if (!data.candidates || !data.candidates[0]) throw new Error("Invalid or empty Gemini response");
+
+    let resolvedCode = data.candidates[0].content.parts[0].text;
+    resolvedCode = resolvedCode.replace(/^```[a-z]*\n/gm, '').replace(/```$/gm, '').trim();
+
+    res.json({ success: true, resolvedCode });
+  } catch (err) {
+    console.error("Gemini Conflict Resolve Error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+// ------------------------------------------------------------------
+// 1️⃣1️⃣ GENERATE COMMIT MESSAGE (UI PREVIEW)
+// ------------------------------------------------------------------
+router.post("/generate-commit", async (req, res) => {
+  try {
+    const repoName = req.body.name;
+    const workspace = await Workspace.findOne({ userId: req.userId });
+    const ROOT_WORKSPACE = path.resolve(process.cwd(), "..", "mcp_workspace");
+    let workspacePath = null;
+
+    // 1. Find the active repo path (DB + File System Fallback)
+    if (workspace) {
+       if (repoName) {
+          const normalize = (str) => str ? str.toLowerCase().replace(/[-_\s]/g, "") : "";
+          const allRepos = await Repo.find({ workspaceId: workspace._id });
+          const repoDoc = allRepos.find(r => normalize(r.localPath).includes(normalize(repoName)));
+          
+          if (repoDoc) {
+             workspacePath = repoDoc.localPath;
+          } else {
+             // 🟢 THE FIX: File System Fallback for untracked repos (like goback_N)
+             try {
+                 const possiblePath = path.resolve(ROOT_WORKSPACE, repoName);
+                 await fs.access(path.join(possiblePath, ".git")); 
+                 workspacePath = possiblePath;
+             } catch (e) {}
+          }
+       } else if (workspace.activeRepoId) {
+          const activeRepo = await Repo.findById(workspace.activeRepoId);
+          if (activeRepo) workspacePath = activeRepo.localPath;
+       }
+    }
+
+    if (!workspacePath) return res.status(400).json({ error: "No active repository found." });
+
+    // 2. Get the RAW Git Diff (Unstaged + Staged)
+    const { default: simpleGit } = await import("simple-git");
+    const git = simpleGit(workspacePath);
+    
+    const unstagedDiff = await git.diff();
+    const stagedDiff = await git.diff(['--cached']);
+    const fullDiff = (stagedDiff + "\n" + unstagedDiff).trim();
+
+    if (!fullDiff) {
+        return res.json({ success: true, message: "Update files", diff: null });
+    }
+
+    // 3. Send the raw diff text back to the frontend so Puter can read it!
+    res.json({ success: true, diff: fullDiff.substring(0, 5000) });
+  } catch (err) {
+    console.error("Generate Commit Error:", err);
+    res.json({ success: true, message: "Update files", diff: null });
+  }
+});
+
+// ------------------------------------------------------------------
+// 1️⃣2️⃣ GET REPOSITORY BRANCHES
+// ------------------------------------------------------------------
+router.post("/list-branches", async (req, res) => {
+  try {
+    const repoName = req.body.name;
+    const workspace = await Workspace.findOne({ userId: req.userId });
+    const ROOT_WORKSPACE = path.resolve(process.cwd(), "..", "mcp_workspace");
+    let workspacePath = null;
+
+    // Resolve the active repository path
+    if (workspace && repoName) {
+      const normalize = (str) => str ? str.toLowerCase().replace(/[-_\s]/g, "") : "";
+      const allRepos = await Repo.find({ workspaceId: workspace._id });
+      const repoDoc = allRepos.find(r => normalize(r.localPath).includes(normalize(repoName)));
+      
+      if (repoDoc) {
+          workspacePath = repoDoc.localPath;
+      } else {
+          try {
+              const possiblePath = path.resolve(ROOT_WORKSPACE, repoName);
+              await fs.access(path.join(possiblePath, ".git")); 
+              workspacePath = possiblePath;
+          } catch (e) {}
+      }
+    }
+
+    if (!workspacePath) return res.json({ success: false, error: "Repository not found." });
+
+    // Read the branches using simple-git
+    const { default: simpleGit } = await import("simple-git");
+    const git = simpleGit(workspacePath);
+    const branchSummary = await git.branchLocal();
+
+    res.json({ 
+      success: true, 
+      all: branchSummary.all,         // Array of branch names
+      current: branchSummary.current  // The active branch name
+    });
+
+  } catch (err) {
+    console.error("List Branches Error:", err);
+    res.json({ success: false, error: err.message });
   }
 });
 

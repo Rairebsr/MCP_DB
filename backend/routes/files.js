@@ -1,5 +1,5 @@
 import express from 'express';
-import { readFileAndSync, writeFileAndSync,listFilesAndSync,uploadFileAndSync } from '../services/fs.service.js';
+import { readFileAndSync, writeFileAndSync,listFilesAndSync,uploadFileAndSync , deleteFileAndSync } from '../services/fs.service.js';
 import Workspace from "../models/Workspace.js";
 const router = express.Router();
 
@@ -61,6 +61,26 @@ router.post("/upload", async (req, res, next) => {
     const result = await uploadFileAndSync(workspace._id, filename, content_base64);
     res.json(result);
   } catch (err) { next(err); }
+});
+
+// DELETE FILE / FOLDER
+router.post("/delete", async (req, res, next) => {
+  try {
+    const userId = req.headers["x-user-id"];
+    const { path } = req.body;
+    
+    if (!path) {
+      return res.status(400).json({ error: "Path is required for deletion." });
+    }
+
+    const workspace = await getOrCreateWorkspace(userId);
+    await deleteFileAndSync(workspace._id, path);
+    
+    res.json({ success: true });
+  } catch (err) { 
+    console.error("Delete Route Error:", err);
+    next(err); 
+  }
 });
 
 export default router;

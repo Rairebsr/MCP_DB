@@ -41,7 +41,17 @@ GitHub actions:
 - clone_repo
 - pull_repo
 - push_repo
-
+- switch_branch
+- create_branch
+- delete_branch
+- list_branches
+- get_current_branch
+- merge_branch
+- list_commits
+- get_commit_diff
+- create_pull_request
+- list_pull_requests
+- get_pull_request_diff
 
 File actions:
 - list_files
@@ -149,6 +159,7 @@ Do NOT apply it to create_repo or rename_repo.
 - Extract the repository name as "name" (e.g., "push group13_project" -> name: "group13_project").
 - Extract the commit message as "message" if the user provides one (e.g., "push with message 'fixed typo'").
 - CONVERSATION CONTEXT: If the user replies with just a repository name (e.g., "group13_project") and the conversation history shows the assistant just asked which repository to push to, you MUST output action "push_repo" and extract that "name".
+
 ──────────────── SWITCH_BRANCH RULES ────────────────
 
 - Used when the user wants to create, switch, or checkout a branch.

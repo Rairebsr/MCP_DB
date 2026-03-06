@@ -22,16 +22,24 @@ const App = () => {
   const [activeSidebarTab, setActiveSidebarTab] = useState('activity'); // 'activity' or 'explorer'
   const [fileTree, setFileTree] = useState([]);
   const [currentPath, setCurrentPath] = useState(".");
-  const [confirmDialog, setConfirmDialog] = useState({ isOpen: false, text: "" });
+  const [confirmDialog, setConfirmDialog] = useState({ isOpen: false, text: "", type: null, data: null });
   const [isCreatingFile, setIsCreatingFile] = useState(false);
   const [newFileName, setNewFileName] = useState("");
+  const [repoBranches, setRepoBranches] = useState({ all: [], current: "" });
+  const [showBranchDropdown, setShowBranchDropdown] = useState(false);
   // Tabs and Editor State
   const [openFiles, setOpenFiles] = useState([]); // Array of { path, content, hash, isDirty }
   const [activeFilePath, setActiveFilePath] = useState(null);
-
+  const editorRef = useRef(null); 
+  const monacoRef = useRef(null);
   // Left Sidebar Toggle
   const [showLeftSidebar, setShowLeftSidebar] = useState(true);
 
+  const [showRightPanel, setShowRightPanel] = useState(true); 
+  const [isEditorExpanded, setIsEditorExpanded] = useState(false);
+
+  const [commitModal, setCommitModal] = useState({ isOpen: false, repoName: null, message: "" });
+  const [isGeneratingCommit, setIsGeneratingCommit] = useState(false);
   // 1. Open or Focus a File Tab
   // Helper to open editor
   const openInEditor = (path, content, hash) => {
@@ -125,36 +133,91 @@ const App = () => {
       timestamp: new Date()
     }]);
 
-    try {
-      // Strict prompt to ensure the AI only returns raw code
-      const prompt = `You are an expert developer. Resolve the following git merge conflict. Combine the logic intelligently if both changes are valuable, or pick the most correct one. 
-      CRITICAL INSTRUCTION: RETURN ONLY THE RAW, FINAL RESOLVED CODE. DO NOT wrap it in markdown blocks (no \`\`\`javascript). DO NOT include any explanations or conversational text. 
-      Here is the conflicted file:\n\n${activeFile.content}`;
+   try {
+      // 🧠 1. Pause and ask the human for architectural directions!
+      const userInstructions = window.prompt(
+        "🧠 AI Conflict Resolver\n\nHow should I merge this? (e.g., 'Keep my UI changes but use the database logic from main').\n\nLeave blank to let AI decide:"
+      );
       
-      const response = await window.puter.ai.chat(prompt);
-      let resolvedCode = response?.text || response?.message?.content || String(response);
+      if (userInstructions === null) {
+          setIsProcessing(false);
+          return; // Cancel if the user clicks "Cancel"
+      }
+
+      // Grab the folder name from the active tab so the backend can fetch the Git History
+      const activeRepo = activeFilePath ? activeFilePath.split('/')[0] : null;
+
+      // 🧠 2. Send the code, the repo name, AND the instructions to the backend
+      const res = await fetch("http://localhost:4000/ask/resolve-conflict", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          content: activeFile.content,
+          repoName: activeRepo,
+          instructions: userInstructions
+        })
+      });
       
-      // Safety net: Strip markdown formatting if the AI disobeys
-      resolvedCode = resolvedCode.replace(/^```[a-z]*\n/gm, '').replace(/```$/gm, '').trim();
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error);
+      
+      const resolvedCode = data.resolvedCode;
 
       // Instantly inject the clean code into the Monaco Editor
       setOpenFiles(prev => prev.map(f => 
         f.path === activeFilePath ? { ...f, content: resolvedCode, isDirty: true } : f
       ));
 
+      // ✨ 3. Paint the editor green for visual feedback!
+      // ✨ 3. Paint the editor green for visual feedback!
+      setTimeout(() => {
+        if (editorRef && editorRef.current) {
+          try {
+            const lineCount = resolvedCode.split('\n').length;
+            
+            // Bypass the Monaco API and use a raw coordinate object
+            const decorations = editorRef.current.deltaDecorations([], [
+              {
+                range: { 
+                  startLineNumber: 1, 
+                  startColumn: 1, 
+                  endLineNumber: lineCount, 
+                  endColumn: 1 
+                },
+                options: {
+                  isWholeLine: true,
+                  className: 'ai-success-glow',
+                  marginClassName: 'ai-success-glow'
+                }
+              }
+            ]);
+
+            // Clear the glow after 2 seconds
+            setTimeout(() => {
+              if (editorRef.current) {
+                editorRef.current.deltaDecorations(decorations, []);
+              }
+            }, 2000);
+            
+          } catch (err) {
+            console.error("❌ Glow Error:", err);
+          }
+        }
+      }, 500);
+
       setMessages(prev => [...prev, {
         id: Date.now(),
         type: "system",
-        content: "✨ Conflict automatically resolved in the editor! Please review the changes and click **Save File**.",
+        content: "✨ Conflict automatically resolved!! Please review the changes and click **Save File**.",
         timestamp: new Date()
       }]);
 
     } catch (err) {
-      console.error("Auto-resolve failed:", err);
+      console.error("Auto-Resolve Error:", err);
       setMessages(prev => [...prev, {
         id: Date.now(),
         type: "error",
-        content: "❌ Failed to auto-resolve. Please check your Puter AI connection.",
+        content: `❌ Failed to auto-resolve: ${err.message}`,
         timestamp: new Date()
       }]);
     } finally {
@@ -394,8 +457,41 @@ const startRequest = () => ({
   });
   // 🔘 Handles clicks from the Confirmation Modal
   const handleDialogResponse = async (answer) => {
-    setConfirmDialog({ isOpen: false, text: "" }); // Close modal immediately
+    // 1. Capture current modal data before closing it
+    const dialogType = confirmDialog.type;
+    const dialogData = confirmDialog.data;
     
+    setConfirmDialog({ isOpen: false, text: "", type: null, data: null }); // Close modal immediately
+    
+    // 🟢 2. NEW: Intercept Direct File/Folder Deletions from the UI!
+    if (dialogType === "delete_file") {
+      if (answer === "yes") {
+        try {
+          const res = await fetch("http://localhost:5000/api/files/delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-User-Id": user?.login },
+            body: JSON.stringify({ path: dialogData.path })
+          });
+          
+          if (res.ok) {
+            fetchFiles(currentPath); // Refresh the folder tree
+            
+            // If the deleted file is currently open in the editor, close the tab!
+            setOpenFiles(prev => prev.filter(f => f.path !== dialogData.path));
+            if (activeFilePath === dialogData.path) setActiveFilePath(null);
+            
+            setActivityStream(prev => [{ 
+              id: Date.now(), action: "delete_file", message: `Deleted ${dialogData.path.split('/').pop()}`, timestamp: new Date() 
+            }, ...prev]);
+          } else {
+            console.error("Failed to delete file/folder on server.");
+          }
+        } catch (err) { console.error("Delete request failed:", err); }
+      }
+      return; // Stop here! Do not send this to the AI Orchestrator.
+    }
+
+    // 🤖 3. EXISTING LOGIC: Handle AI Orchestrator Confirmations (like delete_repo)
     // Visually add your choice to the chat
     setMessages(prev => [...prev, {
       id: Date.now(), type: "user", content: answer, timestamp: new Date()
@@ -439,9 +535,11 @@ const startRequest = () => ({
        setIsProcessing(false);
     }
   };
+
+
   const handleSubmit = async (e) => {
   const req = startRequest();
-  e.preventDefault();
+  e?.preventDefault();
 
   if (!user) {
     setMessages(prev => [...prev, {
@@ -463,7 +561,7 @@ const startRequest = () => ({
     return;
   }
 
-  if (!inputValue.trim()) return;
+  if (!inputValue.trim() || isProcessing) return;
 
   const currentInput = inputValue;
 
@@ -479,90 +577,67 @@ const startRequest = () => ({
   setInputValue("");
 
   try {
-        let payload;
+    let payload;
+    const lowerInput = currentInput.toLowerCase();
+    
+    // 🛑 2. GITHUB-STYLE COMMIT MODAL TRIGGER
+     if (lowerInput.startsWith("push") || lowerInput.includes("push changes") || lowerInput.includes("sync")) {
+      const repoMatch = currentInput.match(/in (?:the )?([^\s]+)/i);
+      const detectedRepo = repoMatch ? repoMatch[1] : (activeFilePath ? activeFilePath.split('/')[0] : null);
+      
+      setCommitModal({ isOpen: true, repoName: detectedRepo, message: "" });
+      setIsProcessing(false);
+      return; // 🛑 Halt chat and show modal! Do not execute the rest of the function.
+    }
 
-        // 🛑 HARD COMMAND INTERCEPTOR: Bypass AI hallucination for branching & pushing
-        const lowerInput = currentInput.toLowerCase();
-        
-        if (lowerInput.includes("branch")) {
-          // 🧠 UPGRADED REGEX: Safely ignores "to", "named", and "called"
-          const branchMatch = currentInput.match(/branch\s+(?:named\s+|called\s+|to\s+)?([^\s]+)/i);
-          
-          if (branchMatch) {
-            payload = {
-              action: "switch_branch",
-              parameters: { branch: branchMatch[1] }
-            };
-            const repoMatch = currentInput.match(/in (?:the )?([^\s]+)/i);
-            if (repoMatch) payload.parameters.name = repoMatch[1];
-          }
-        } else if (lowerInput.startsWith("push") || lowerInput.includes("push changes")) {
-          // Instantly lock in the push command without asking the AI
-          payload = {
-            action: "push_repo",
-            parameters: {}
-          };
-          const repoMatch = currentInput.match(/in (?:the )?([^\s]+)/i);
-          if (repoMatch) payload.parameters.name = repoMatch[1];
-        }
+    // Only ask the AI Router if we haven't manually intercepted the command
+    if (!payload) {
+      // 🧠 ALWAYS USE ROUTER MODE (Allow context switching)
+      const chatHistory = messages
+        .slice(-4)
+        .map(m => ({
+          role: m.type === "user" ? "user" : "assistant",
+          content: typeof m.content === "string" ? m.content : JSON.stringify(m.content)
+        }));
 
-        // Only ask the AI Router if we haven't manually intercepted the command
-        if (!payload) {
-          // 🧠 ALWAYS USE ROUTER MODE (Allow context switching)
-          const chatHistory = messages
-            .slice(-4)
-            .map(m => ({
-              role: m.type === "user" ? "user" : "assistant",
-              content: typeof m.content === "string"
-                ? m.content
-                : JSON.stringify(m.content)
-            }));
+      const routerResponse = await askPuter(currentInput, chatHistory, "router");
 
-          const routerResponse = await askPuter(currentInput, chatHistory, "router");
-
-          try {
-            payload = JSON.parse(routerResponse);
-          } catch {
-            // fallback: router responded with text
-            setMessages(prev => [...prev, {
-              id: Date.now(),
-              type: "assistant",
-              content: routerResponse,
-              timestamp: new Date()
-            }]);
-            setIsProcessing(false);
-            return;
-          }
-        }
+      try {
+        payload = JSON.parse(routerResponse);
+      } catch {
+        // fallback: router responded with text
+        setMessages(prev => [...prev, {
+          id: Date.now(),
+          type: "assistant",
+          content: routerResponse,
+          timestamp: new Date()
+        }]);
+        setIsProcessing(false);
+        return;
+      }
+    }
 
     // 🔄 SMART CONTEXT MERGING
-    // If the router didn't recognize a new command (action is null) but we have a pending action,
-    // we assume the user is answering a clarification question.
     if (pendingAction && payload.action === null) {
       payload.action = pendingAction;
       payload.parameters = payload.parameters || {};
       payload.parameters._continuation = currentInput;
     }
+
     // 🛟 SAFETY NET: If the AI router STILL failed to pick an action, fallback to keyword matching
     if (!payload.action && !pendingAction) {
-      const lowerInput = currentInput.toLowerCase();
-      if (lowerInput.includes("push") || lowerInput.includes("sync")) {
-        payload.action = "push_repo";
-      } else if (lowerInput.includes("clone") || lowerInput.includes("download")) {
+      // (Removed the old push override here so it doesn't bypass the modal!)
+      if (lowerInput.includes("clone") || lowerInput.includes("download")) {
         payload.action = "clone_repo";
       } else {
         // 🧠 CONVERSATIONAL FALLBACK: The user is asking a question!
-        // Grab the content of the currently open file so the AI can read it.
         const activeFile = openFiles.find(f => f.path === activeFilePath);
         const contextString = activeFile 
           ? `\n\n[Context: I am currently looking at ${activeFile.path}. Here is the exact code containing the conflict:]\n${activeFile.content}` 
           : "";
 
-        // Send it to the AI as a chat prompt instead of a backend action
         try {
-          // Using Puter's direct AI chat to bypass the JSON router
           const chatResponse = await window.puter.ai.chat(currentInput + contextString);
-          
           setMessages(prev => [...prev, {
             id: Date.now(),
             type: "assistant",
@@ -577,23 +652,19 @@ const startRequest = () => ({
             timestamp: new Date()
           }]);
         }
-        
         setIsProcessing(false);
-        return; // Halt here so we don't hit the backend with an undefined action
+        return; 
       }
     }
     
-    // 🎯 NEW: Auto-Inject Active Repository for Git operations
+    // 🎯 Auto-Inject Active Repository for Git operations
     if (payload.action === "push_repo" || payload.action === "clone_repo" || payload.action === "switch_branch") {
       payload.parameters = payload.parameters || {};
-      
-      // If the AI didn't specify a repo name, but we have a file open in the editor...
       if (!payload.parameters.name && activeFilePath) {
-         // Extract the root folder name from the active tab (e.g., "goback_N" from "goback_N/sort.c")
          payload.parameters.name = activeFilePath.split('/')[0];
       }
     }
-    // 🚀 SEND TO ORCHESTRATOR
+
     // 🚀 SEND TO ORCHESTRATOR
     const backendRes = await fetch("http://localhost:4000/ask", {
       method: "POST",
@@ -637,13 +708,12 @@ const startRequest = () => ({
     }
 
     // 4. Handle Pending Action / Clarification
-    // 4. Handle Pending Action / Clarification
     if (data.needsInput && data.pendingAction) {
       setPendingAction(data.pendingAction);
       
-      // 🚨 NEW: Trigger the modal if it's a dangerous action!
+      // Trigger the modal if it's a dangerous action!
       if (data.aiResponse.includes("HUMAN-IN-THE-LOOP") || data.pendingAction === "delete_repo") {
-         setConfirmDialog({ isOpen: true, text: data.aiResponse });
+         setConfirmDialog({ isOpen: true, text: data.aiResponse, type: "ai_action" });
       }
 
       setMessages(prev => [...prev, {
@@ -800,6 +870,8 @@ const startRequest = () => ({
     }
   };
   const handleEditorDidMount = (editor, monaco) => {
+    editorRef.current = editor;
+    monacoRef.current = monaco;
     // 1. Safely get the model
     const model = editor.getModel();
     if (!model) return;
@@ -826,6 +898,54 @@ const startRequest = () => ({
           }
         }]);
       }
+    }
+  };
+
+  // Fetch branches whenever the active repo changes
+  useEffect(() => {
+    const fetchBranches = async () => {
+      const activeRepo = activeFilePath ? activeFilePath.split('/')[0] : null;
+      if (!activeRepo) return setRepoBranches({ all: [], current: "" });
+
+      try {
+        const res = await fetch("http://localhost:4000/ask/list-branches", {
+          method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include",
+          body: JSON.stringify({ name: activeRepo })
+        });
+        const data = await res.json();
+        if (data.success) {
+          setRepoBranches({ all: data.all, current: data.current });
+        }
+      } catch (err) { console.error("Failed to fetch branches:", err); }
+    };
+    fetchBranches();
+  }, [activeFilePath, activityStream]); // Re-fetch on activity so branches update after a push/switch
+
+  // Handle clicking a branch from the list
+  const handleBranchSwitch = async (branchName) => {
+    setShowBranchDropdown(false);
+    if (branchName === repoBranches.current) return;
+
+    const activeRepo = activeFilePath ? activeFilePath.split('/')[0] : null;
+    setIsProcessing(true);
+    setMessages(prev => [...prev, { id: Date.now(), type: "user", content: `Switching to branch: ${branchName}`, timestamp: new Date() }]);
+
+    try {
+      const payload = { action: "switch_branch", parameters: { branch: branchName, name: activeRepo } };
+      const backendRes = await fetch("http://localhost:4000/ask", {
+        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include",
+        body: JSON.stringify(payload)
+      });
+      const data = await backendRes.json();
+      
+      if (data.success) {
+        setActivityStream(prev => [{ id: Date.now(), action: "switch_branch", message: `Switched to ${branchName}`, timestamp: new Date() }, ...prev]);
+      }
+      setMessages(prev => [...prev, { id: Date.now() + 1, type: data.success ? "assistant" : "error", content: data.aiResponse || data.error || `Failed to switch to ${branchName}`, timestamp: new Date() }]);
+    } catch (e) { 
+      console.error(e); 
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -862,27 +982,54 @@ const startRequest = () => ({
 
           <div className="flex-1 overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-gray-700">
             {/* VIEW 1: ACTIVITY STREAM */}
+            {/* VIEW 1: ACTIVITY STREAM & SYSTEM STATUS */}
             {activeSidebarTab === 'activity' && (
-              <div className="space-y-4">
-                {activityStream.length === 0 ? (
-                  <div className="text-xs text-gray-500 text-center mt-10">No recent activity</div>
-                ) : (
-                  activityStream.map((item) => (
-                    <div key={item.id} className="flex items-start space-x-3 text-sm">
-                      <div className={`mt-0.5 ${item.action === 'conflict' ? 'text-yellow-500' : 'text-green-500'}`}>
-                        {item.action === 'conflict' ? '⚠️' : '✓'}
-                      </div>
-                      <div>
-                        <div className="text-gray-300 font-medium capitalize">
-                          {item.action.replace(/_/g, ' ')}
+              <div className="flex flex-col h-full overflow-hidden">
+                {/* Scrollable Activity List */}
+                <div className="flex-1 overflow-y-auto space-y-4 pr-2 scrollbar-thin scrollbar-thumb-gray-700">
+                  {activityStream.length === 0 ? (
+                    <div className="text-xs text-gray-500 text-center mt-10">No recent activity</div>
+                  ) : (
+                    activityStream.map((item) => (
+                      <div key={item.id} className="flex items-start space-x-3 text-sm">
+                        <div className={`mt-0.5 ${item.action === 'conflict' ? 'text-yellow-500' : 'text-green-500'}`}>
+                          {item.action === 'conflict' ? '⚠️' : '✓'}
                         </div>
-                        <div className="text-xs text-gray-500">
-                          {item.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        <div>
+                          <div className="text-gray-300 font-medium capitalize">{item.action.replace(/_/g, ' ')}</div>
+                          <div className="text-xs text-gray-500">{item.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
                         </div>
                       </div>
+                    ))
+                  )}
+                </div>
+
+                {/* Relocated Mini-Analytics (Pinned to bottom) */}
+                <div className="pt-4 mt-4 border-t border-gray-800 shrink-0">
+                  <h3 className="font-semibold text-gray-500 text-[10px] uppercase tracking-wider mb-3">System Health</h3>
+                  
+                  <div className="grid grid-cols-2 gap-2 mb-3">
+                    <div className="bg-gray-800/50 p-2 rounded border border-gray-700/50 text-center">
+                      <div className="text-sm font-bold text-green-400">{performanceData.successRate}%</div>
+                      <div className="text-gray-500 text-[8px] uppercase tracking-tighter">Success</div>
                     </div>
-                  ))
-                )}
+                    <div className="bg-gray-800/50 p-2 rounded border border-gray-700/50 text-center">
+                      <div className="text-sm font-bold text-blue-400">
+                        {performanceData.responseTimes.length ? Math.round(performanceData.responseTimes.reduce((a, b) => a + b, 0) / performanceData.responseTimes.length) : 0}ms
+                      </div>
+                      <div className="text-gray-500 text-[8px] uppercase tracking-tighter">Latency</div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    {['LLM Orchestrator', 'API Gateway'].map((service) => (
+                      <div key={service} className="flex items-center justify-between px-2 py-1 bg-gray-800/30 rounded border border-gray-700/50">
+                        <span className="text-[10px] text-gray-400">{service}</span>
+                        <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             )}
 
@@ -937,14 +1084,38 @@ const startRequest = () => ({
 
                     {/* File/Folder List */}
                     {fileTree.map(file => (
-                      <button 
-                        key={file.name} 
-                        onClick={() => handleFileClick(file)} 
-                        className="text-left text-sm text-gray-300 hover:text-white flex items-center gap-2 py-1.5 px-2 rounded-lg hover:bg-gray-800 transition-colors"
-                      >
-                        <span className="text-lg leading-none opacity-80">{file.type === 'dir' ? '📁' : '📄'}</span> 
-                        <span className="font-mono text-xs truncate">{file.name}</span>
-                      </button>
+                      <div key={file.name} className="group flex items-center justify-between py-1 px-2 rounded-lg hover:bg-gray-800 transition-colors">
+                        
+                        {/* 📄 Clickable File/Folder Name */}
+                        <button 
+                          onClick={() => handleFileClick(file)} 
+                          className="flex-1 text-left text-sm text-gray-300 hover:text-white flex items-center gap-2 truncate"
+                        >
+                          <span className="text-lg leading-none opacity-80 shrink-0">{file.type === 'dir' ? '📁' : '📄'}</span> 
+                          <span className="font-mono text-xs truncate">{file.name}</span>
+                        </button>
+                        
+                        {/* 🗑️ Hidden Hover Delete Button */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation(); // Prevent the file from opening!
+                            const filePath = currentPath === "." ? file.name : `${currentPath}/${file.name}`;
+                            
+                            // Trigger the global safety modal
+                            setConfirmDialog({
+                               isOpen: true,
+                               type: "delete_file",
+                               data: { path: filePath },
+                               text: `⚠️ **HUMAN-IN-THE-LOOP AUTHORIZATION REQUIRED:**\n\nAre you absolutely sure you want to permanently delete the ${file.type === 'dir' ? 'folder' : 'file'} **\`${file.name}\`**?\n\nThis action cannot be undone.\n\nReply **"yes"** to confirm or **"no"** to cancel.`
+                            });
+                          }}
+                          className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400 p-1 rounded hover:bg-gray-700 transition-all ml-2 shrink-0"
+                          title={`Delete ${file.type === 'dir' ? 'folder' : 'file'}`}
+                        >
+                          🗑️
+                        </button>
+                        
+                      </div>
                     ))}
                     
                     {fileTree.length === 0 && !isCreatingFile && (
@@ -1027,6 +1198,7 @@ const startRequest = () => ({
           {/* Horizontal Container for Chat and Editor */}
       <div className="flex-1 flex flex-row overflow-hidden">
         {/* Chat Section */}
+        {!isEditorExpanded && (
         <div className={`flex flex-col border-r border-gray-700 transition-all duration-300 ${openFiles.length > 0 ? 'w-[450px]' : 'flex-1'}`}>
           <div className="flex-1 overflow-y-auto p-6 scrollbar-thin scrollbar-thumb-gray-700">
             {messages.map((message) => (
@@ -1075,34 +1247,57 @@ const startRequest = () => ({
             </form>
           </div>
         </div>
-
+        )}
         {/* Editor Section (Slides in from Right) */}
         {/* Multi-Tab Editor Section */}
         {openFiles.length > 0 && (
           <div className="flex-1 flex flex-col bg-[#1e1e1e] animate-in slide-in-from-right duration-300 border-l border-gray-800 min-w-0">
             
             {/* 1. Tab Bar */}
-            <div className="flex bg-[#181818] overflow-x-auto scrollbar-none border-b border-gray-800 shrink-0">
-              {openFiles.map(file => (
-                <div 
-                  key={file.path}
-                  onClick={() => setActiveFilePath(file.path)}
-                  className={`group flex items-center gap-2 px-4 py-2 text-xs font-mono cursor-pointer border-r border-gray-800 max-w-[200px] ${
-                    activeFilePath === file.path 
-                      ? 'bg-[#1e1e1e] text-blue-400 border-t-2 border-t-blue-500' 
-                      : 'text-gray-500 hover:bg-[#252525]'
-                  }`}
-                >
-                  <span className="truncate">{file.path.split('/').pop()}</span>
-                  {file.isDirty && <span className="w-2 h-2 rounded-full bg-yellow-500 shrink-0"></span>}
-                  <button 
-                    onClick={(e) => closeTab(e, file.path)} 
-                    className={`ml-auto p-1 rounded hover:bg-gray-700 opacity-0 group-hover:opacity-100 transition-opacity ${file.isDirty ? 'opacity-100' : ''}`}
+            {/* 1. Tab Bar & Global Controls */}
+            <div className="flex bg-[#181818] border-b border-gray-800 shrink-0 justify-between">
+              
+              {/* Tabs */}
+              <div className="flex overflow-x-auto scrollbar-none flex-1">
+                {openFiles.map(file => (
+                  <div 
+                    key={file.path}
+                    onClick={() => setActiveFilePath(file.path)}
+                    className={`group flex items-center gap-2 px-4 py-2 text-xs font-mono cursor-pointer border-r border-gray-800 max-w-[200px] ${
+                      activeFilePath === file.path 
+                        ? 'bg-[#1e1e1e] text-blue-400 border-t-2 border-t-blue-500' 
+                        : 'text-gray-500 hover:bg-[#252525]'
+                    }`}
                   >
-                    ✕
-                  </button>
-                </div>
-              ))}
+                    <span className="truncate">{file.path.split('/').pop()}</span>
+                    {file.isDirty && <span className="w-2 h-2 rounded-full bg-yellow-500 shrink-0"></span>}
+                    <button 
+                      onClick={(e) => closeTab(e, file.path)} 
+                      className={`ml-auto p-1 rounded hover:bg-gray-700 opacity-0 group-hover:opacity-100 transition-opacity ${file.isDirty ? 'opacity-100' : ''}`}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              {/* 🎛️ GLOBAL EDITOR CONTROLS */}
+              <div className="flex items-center px-2 space-x-1 border-l border-gray-800 bg-[#1e1e1e] shrink-0">
+                <button
+                  onClick={() => setIsEditorExpanded(!isEditorExpanded)}
+                  className="p-1.5 text-gray-400 hover:text-white rounded hover:bg-gray-700 transition-colors"
+                  title={isEditorExpanded ? "Collapse Editor" : "Expand Editor"}
+                >
+                  {isEditorExpanded ? '🗗' : '🗖'}
+                </button>
+                <button
+                  onClick={() => { setOpenFiles([]); setActiveFilePath(null); setIsEditorExpanded(false); }}
+                  className="p-1.5 text-gray-400 hover:text-red-400 rounded hover:bg-gray-700 transition-colors"
+                  title="Close All Files"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
 
             {/* 2. Editor Toolbar */}
@@ -1161,135 +1356,152 @@ const startRequest = () => ({
     </div>
 
       {/* Right Panel - Analytics (Retractable) */}
-<div className={`bg-gray-800 border-l border-gray-700 transition-all duration-300 flex flex-col relative shrink-0 ${showAnalytics ? 'w-80' : 'w-12'}`}>
-  
-  {/* Retract/Expand Toggle Button */}
-  <button 
-    onClick={() => setShowAnalytics(!showAnalytics)}
-    className="absolute -left-4 top-10 transform bg-gray-700 border border-gray-600 rounded-full w-8 h-8 flex items-center justify-center z-50 hover:bg-blue-600 transition-colors shadow-lg"
-    title={showAnalytics ? "Collapse Sidebar" : "Expand Sidebar"}
-  >
-    {showAnalytics ? '→' : '←'}
-  </button>
+{/* Right Panel - Git Context (Retractable) */}
+      <div className={`bg-[#161b22] border-l border-gray-800 transition-all duration-300 flex flex-col relative shrink-0 ${showRightPanel ? 'w-80' : 'w-12'}`}>
+        
+        {/* Retract/Expand Toggle Button */}
+        <button 
+          onClick={() => setShowRightPanel(!showRightPanel)}
+          className="absolute -left-4 top-10 transform bg-gray-700 border border-gray-600 rounded-full w-8 h-8 flex items-center justify-center z-50 hover:bg-blue-600 transition-colors shadow-lg"
+          title={showRightPanel ? "Collapse Git Panel" : "Expand Git Panel"}
+        >
+          {showRightPanel ? '→' : '←'}
+        </button>
 
-  {showAnalytics ? (
-    <div className="flex flex-col h-full overflow-hidden">
-      <div className="p-6 border-b border-gray-700 shrink-0">
-        <h2 className="text-xl font-semibold flex items-center gap-2">
-          <span className="text-blue-400">📊</span> Analytics
-        </h2>
-      </div>
-      
-      <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-700">
-        {/* Performance Metrics */}
-        <div className="p-6 border-b border-gray-700">
-          <h3 className="font-semibold mb-4 text-gray-400 text-xs uppercase tracking-wider text-left">Performance</h3>
-          <div className="grid grid-cols-2 gap-3">
-            {/* Success Rate */}
-            <div className="bg-gray-750 p-4 rounded-xl border border-gray-600 text-center shadow-inner">
-              <div className="text-2xl font-bold text-green-400">
-                {performanceData.successRate}%
-              </div>
-              <div className="text-gray-400 text-[10px] mt-1 uppercase tracking-tighter font-semibold">Success Rate</div>
+        {showRightPanel ? (
+          <div className="flex flex-col h-full overflow-hidden">
+            {/* Header */}
+            <div className="p-5 border-b border-gray-800 shrink-0">
+              <h2 className="text-lg font-semibold flex items-center gap-2 text-gray-200">
+                <span className="text-blue-400">🐙</span> Git Context
+              </h2>
             </div>
-
-            {/* Avg Response */}
-            <div className="bg-gray-750 p-4 rounded-xl border border-gray-600 text-center shadow-inner">
-              <div className="text-2xl font-bold text-blue-400">
-                {performanceData.responseTimes.length
-                  ? Math.round(
-                      performanceData.responseTimes.reduce((a, b) => a + b, 0) /
-                      performanceData.responseTimes.length
-                    )
-                  : 0}ms
-              </div>
-              <div className="text-gray-400 text-[10px] mt-1 uppercase tracking-tighter font-semibold">Avg Response</div>
-            </div>
-          </div>
-        </div>
-
-        {/* Response Time Chart */}
-        <div className="p-6 border-b border-gray-700">
-          <h3 className="font-semibold mb-4 text-gray-400 text-xs uppercase tracking-wider text-left text-left">Response Time Variance</h3>
-          <div className="flex items-end space-x-1 h-48">
-            {performanceData.responseTimes.map((time, index) => {
-              const maxTime = Math.max(...performanceData.responseTimes);
-              const minTime = Math.min(...performanceData.responseTimes);
-              const previousTime = index > 0 ? performanceData.responseTimes[index - 1] : time;
-              const difference = time - previousTime;
+            
+            <div className="flex-1 overflow-y-auto p-5 space-y-6 scrollbar-thin scrollbar-thumb-gray-700">
               
-              return (
-                <div key={index} className="flex flex-col items-center flex-1">
-                  <div className="relative w-full group">
-                    <div className="w-full bg-gradient-to-t from-gray-800 to-gray-900 rounded-t-lg h-32 flex flex-col justify-end">
-                      <div
-                        className={`rounded-t-lg w-full transition-all duration-500 ${
-                          time <= 100 ? 'bg-gradient-to-t from-green-400 to-emerald-600' :
-                          time <= 150 ? 'bg-gradient-to-t from-yellow-400 to-amber-600' :
-                          'bg-gradient-to-t from-red-400 to-rose-600'
-                        }`}
-                        style={{ 
-                          height: `${((time - minTime) / (maxTime - minTime || 1)) * 90 + 10}%`,
-                          boxShadow: `0 0 10px ${time <= 100 ? 'rgba(34, 197, 94, 0.2)' : 'rgba(239, 68, 68, 0.2)'}`
-                        }}
-                      >
-                        {time > 150 && (
-                          <div className="absolute inset-0 rounded-t-lg bg-red-400 animate-pulse opacity-10"></div>
-                        )}
+              {/* Repository Information */}
+              <div className="space-y-3">
+                <div className="bg-[#0d1117] border border-gray-700 rounded-lg p-4 shadow-inner">
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 font-bold">Active Repository</div>
+                  <div className="font-mono text-sm text-blue-400 truncate">
+                    {activeFilePath ? activeFilePath.split('/')[0] : "No Active Repo"}
+                  </div>
+                </div>
+
+                {/* 🔀 Branch Selector Component */}
+                <div className="bg-[#0d1117] border border-gray-700 rounded-lg p-4 relative shadow-inner">
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-2 font-bold">Current Branch</div>
+                  
+                  {/* Dropdown Toggle Button */}
+                  <button 
+                    onClick={() => setShowBranchDropdown(!showBranchDropdown)}
+                    disabled={!repoBranches.current}
+                    className="w-full flex items-center justify-between font-mono text-sm text-green-400 hover:text-green-300 transition-colors bg-gray-900/50 hover:bg-gray-800 border border-gray-700 rounded px-3 py-2 disabled:opacity-50"
+                  >
+                    <div className="flex items-center gap-2">
+                      <svg aria-hidden="true" height="14" viewBox="0 0 16 16" width="14" fill="currentColor">
+                        <path d="M11.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm-2.25.75a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.492 2.492 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM3.5 3.25a.75.75 0 1 1 1.5 0 .75.75 0 0 1-1.5 0Z"></path>
+                      </svg>
+                      {repoBranches.current || "No branch"}
+                    </div>
+                    <span className="text-[10px] text-gray-500">▼</span>
+                  </button>
+
+                  {/* Dropdown Menu List */}
+                  {showBranchDropdown && (
+                    <div className="absolute top-full left-0 mt-1 w-full bg-[#161b22] border border-gray-700 rounded-lg shadow-2xl z-50 max-h-48 overflow-y-auto animate-in fade-in zoom-in duration-100">
+                      <div className="p-2 text-[10px] font-bold text-gray-500 border-b border-gray-800 uppercase tracking-wider bg-[#0d1117] rounded-t-lg">
+                        Switch Branch
+                      </div>
+                      <div className="p-1">
+                        {repoBranches.all.map(branch => (
+                          <button
+                            key={branch}
+                            onClick={() => handleBranchSwitch(branch)}
+                            className="w-full text-left px-3 py-2 text-sm font-mono text-gray-300 hover:bg-[#238636] hover:text-white rounded transition-colors flex items-center group"
+                          >
+                            <span className={`w-4 mr-2 text-green-400 group-hover:text-white ${branch === repoBranches.current ? 'opacity-100' : 'opacity-0'}`}>
+                              ✓
+                            </span>
+                            {branch}
+                          </button>
+                        ))}
                       </div>
                     </div>
-                    {/* Tooltip */}
-                    <div className="absolute -top-12 left-1/2 -translate-x-1/2 bg-gray-900 border border-gray-700 rounded-lg p-2 opacity-0 group-hover:opacity-100 transition-all z-50 shadow-2xl pointer-events-none">
-                       <div className="text-xs font-bold text-white whitespace-nowrap">{time}ms</div>
-                    </div>
-                  </div>
-                  <div className="mt-2 text-[10px] text-gray-500 font-mono">#{index + 1}</div>
+                  )}
                 </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* System Status */}
-        <div className="p-6">
-          <h3 className="font-semibold mb-4 text-gray-400 text-xs uppercase tracking-wider text-left">System Status</h3>
-          <div className="space-y-3">
-            {[
-              { name: 'LLM Orchestrator', status: 'online' },
-              { name: 'API Gateway', status: 'online' },
-              { name: 'Database', status: 'online' }
-            ].map((service) => (
-              <div key={service.name} className="flex items-center justify-between p-3 bg-gray-750 rounded-lg border border-gray-700 group hover:border-blue-500/50 transition-colors">
-                <span className="text-sm text-gray-300">{service.name}</span>
-                <div className="w-2.5 h-2.5 bg-green-400 rounded-full shadow-[0_0_8px_rgba(74,222,128,0.5)] animate-pulse"></div>
               </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
-  ) : (
-  /* Retracted View - Vertical Sidebar */
-  <div 
-    className="w-12 flex flex-col items-center py-6 h-full cursor-pointer hover:bg-gray-750 transition-all duration-300 border-l border-gray-700 bg-gray-800"
-    onClick={() => setShowAnalytics(true)}
-  >
-    {/* Rotate container to keep text centered in the narrow bar */}
-    <div className="flex-1 flex flex-col items-center justify-center w-full overflow-hidden">
-      <span className="transform -rotate-90 whitespace-nowrap font-bold tracking-[0.2em] text-[10px] uppercase text-gray-500 origin-center">
-        Analytics Dashboard
-      </span>
-    </div>
+              {/* Quick Actions Grid */}
+              <div>
+                <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-3">Quick Actions</h3>
+                <div className="grid grid-cols-2 gap-3">
+                  <button 
+                    onClick={() => setInputValue("git pull")}
+                    className="flex flex-col items-center justify-center py-4 px-2 bg-gray-800/40 hover:bg-gray-700 border border-gray-700 rounded-xl transition-all hover:border-blue-500/50 group"
+                  >
+                    <span className="text-xl mb-2 group-hover:-translate-y-1 transition-transform">⬇️</span>
+                    <span className="text-xs text-gray-300 font-mono">Pull</span>
+                  </button>
+                  
+                  {/* Commits trigger the actual GitHub modal directly! */}
+                  <button 
+                    onClick={() => setCommitModal({ isOpen: true, repoName: activeFilePath ? activeFilePath.split('/')[0] : null, message: "" })}
+                    className="flex flex-col items-center justify-center py-4 px-2 bg-[#238636]/10 hover:bg-[#238636]/20 border border-[#238636]/30 rounded-xl transition-all hover:border-[#2ea043] group shadow-[0_0_15px_rgba(35,134,54,0.1)]"
+                  >
+                    <span className="text-xl mb-2 group-hover:-translate-y-1 transition-transform">✨</span>
+                    <span className="text-xs text-[#3fb950] font-mono">Commit</span>
+                  </button>
 
-    {/* Icons at the bottom */}
-    <div className="flex flex-col space-y-6 pb-10 opacity-40">
-      <span className="text-sm" title="Performance">📈</span>
-      <span className="text-sm" title="Latency">⚡</span>
-      <span className="text-sm" title="System Health">💾</span>
-    </div>
-  </div>
-)}
-</div>
+                  <button 
+                    onClick={() => setInputValue("push changes")}
+                    className="flex flex-col items-center justify-center py-4 px-2 bg-blue-900/10 hover:bg-blue-900/20 border border-blue-800/30 rounded-xl transition-all hover:border-blue-500 group"
+                  >
+                    <span className="text-xl mb-2 group-hover:-translate-y-1 transition-transform">⬆️</span>
+                    <span className="text-xs text-blue-400 font-mono">Push</span>
+                  </button>
+
+                  <button 
+                    onClick={() => setInputValue("switch branch to ")}
+                    className="flex flex-col items-center justify-center py-4 px-2 bg-purple-900/10 hover:bg-purple-900/20 border border-purple-800/30 rounded-xl transition-all hover:border-purple-500 group"
+                  >
+                    <span className="text-xl mb-2 group-hover:-translate-y-1 transition-transform">🔀</span>
+                    <span className="text-xs text-purple-400 font-mono">Branch</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* File Status Area */}
+              <div className="pt-4 border-t border-gray-800">
+                <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-2 font-bold">Working Tree Status</div>
+                <div className="text-sm bg-gray-900/50 p-3 rounded-lg border border-gray-800 font-mono flex items-center gap-2">
+                  {openFiles.some(f => f.isDirty) ? (
+                    <><span className="text-yellow-400 animate-pulse">●</span> <span className="text-gray-300">Unsaved changes</span></>
+                  ) : (
+                    <><span className="text-green-400">✓</span> <span className="text-gray-300">Clean tree</span></>
+                  )}
+                </div>
+              </div>
+
+            </div>
+          </div>
+        ) : (
+          /* Retracted View - Vertical Sidebar */
+          <div 
+            className="w-12 flex flex-col items-center py-6 h-full cursor-pointer hover:bg-gray-800 transition-all duration-300 border-l border-gray-700 bg-[#161b22]"
+            onClick={() => setShowRightPanel(true)}
+          >
+            <div className="flex-1 flex flex-col items-center justify-center w-full overflow-hidden">
+              <span className="transform -rotate-90 whitespace-nowrap font-bold tracking-[0.2em] text-[10px] uppercase text-gray-500 origin-center">
+                Git Context
+              </span>
+            </div>
+            <div className="flex flex-col space-y-6 pb-10 opacity-40">
+              <span className="text-sm">🐙</span>
+              <span className="text-sm">🔀</span>
+            </div>
+          </div>
+        )}
+      </div>
 
 {/* Global Hidden Utilities */}
 {/* 🛑 Destructive Action Confirmation Modal */}
@@ -1322,12 +1534,133 @@ const startRequest = () => ({
           </div>
         </div>
       )}
-<input
-  type="file"
-  ref={fileInputRef}
-  className="hidden"
-  onChange={(e) => handleFileUpload(e.target.files[0])}
-/>
+{/* 🛑 GitHub-Style Commit Modal */}
+      {commitModal.isOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-[#0d1117] border border-gray-700 rounded-xl p-0 max-w-[450px] w-full shadow-2xl overflow-hidden animate-in fade-in zoom-in duration-200">
+            
+            {/* Header */}
+            <div className="flex justify-between items-center p-3 border-b border-gray-700 bg-[#161b22]">
+              <h3 className="text-sm font-semibold text-white">Commit changes</h3>
+              <button onClick={() => setCommitModal({ isOpen: false, repoName: null, message: "" })} className="text-gray-400 hover:text-white transition-colors">✕</button>
+            </div>
+            
+            {/* Body */}
+            <div className="p-4 space-y-4">
+              <div>
+                <label className="block text-[13px] font-semibold text-white mb-2">Commit message</label>
+                
+                {/* 🎯 FOOLPROOF ALIGNMENT WRAPPER */}
+                <div className="relative w-full">
+                  <input 
+                    type="text" 
+                    value={commitModal.message}
+                    onChange={(e) => setCommitModal(prev => ({ ...prev, message: e.target.value }))}
+                    placeholder="Update files"
+                    className="w-full bg-[#0d1117] border border-[#30363d] rounded-md py-[5px] pl-3 pr-8 text-sm text-[#e6edf3] focus:outline-none focus:border-[#58a6ff] focus:ring-1 focus:ring-[#58a6ff]"
+                  />
+                  
+                  {/* ✨ The Authentic GitHub Generate Button */}
+                  <button 
+                    type="button"
+                    onClick={async (e) => {
+                      e.preventDefault();
+                      setIsGeneratingCommit(true);
+                      try {
+                        // 1. Ask the backend for the raw code changes
+                        const res = await fetch("http://localhost:4000/ask/generate-commit", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          credentials: "include",
+                          body: JSON.stringify({ name: commitModal.repoName })
+                        });
+                        const data = await res.json();
+                        
+                        // 2. If we found code changes, ask PUTER AI to summarize them!
+                        if (data.diff) {
+                          const prompt = `You are an expert developer. Write a single, concise commit message for these git changes. 
+                                          Use the Conventional Commits format (e.g., 'feat: description', 'fix: description', 'refactor: description'). 
+                                          DO NOT use markdown, quotes, or add any explanations. Return strictly the commit message itself: 
+                                          ${data.diff}`;
+                          const chatResponse = await window.puter.ai.chat(prompt);
+                          
+                          // Clean up Puter's response and inject it into the text box
+                          const msg = chatResponse?.text || chatResponse?.message?.content || String(chatResponse);
+                          setCommitModal(prev => ({ ...prev, message: msg.trim().replace(/^"|"$/g, '') }));
+                        } else {
+                          // No changes found
+                          setCommitModal(prev => ({ ...prev, message: data.message || "Update files" }));
+                        }
+                      } catch (err) {
+                        console.error("❌ Puter commit error:", err);
+                        setCommitModal(prev => ({ ...prev, message: "Update files" }));
+                      } finally {
+                        setIsGeneratingCommit(false);
+                      }
+                    }}
+                    disabled={isGeneratingCommit}
+                    className="absolute inset-y-0 right-0 flex items-center pr-2 text-[#8b949e] hover:text-[#58a6ff] bg-transparent disabled:opacity-50 transition-colors"
+                    title="Regenerate commit message"
+                  >
+                    {isGeneratingCommit ? (
+                      <span className="text-xs animate-spin">⏳</span>
+                    ) : (
+                      <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" fill="currentColor">
+                        <path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"></path>
+                      </svg>
+                    )}
+                  </button>
+                </div>
+              </div>
+              
+              <div>
+                <label className="block text-[13px] font-semibold text-white mb-2">Extended description</label>
+                <textarea 
+                  rows="3"
+                  placeholder="Add an optional extended description..."
+                  className="w-full bg-[#0d1117] border border-[#30363d] rounded-md py-2 px-3 text-sm text-[#8b949e] focus:outline-none focus:border-[#58a6ff] focus:ring-1 focus:ring-[#58a6ff] resize-none"
+                ></textarea>
+              </div>
+            </div>
+
+            {/* Footer Buttons */}
+            <div className="p-3 bg-[#161b22] border-t border-gray-700 flex justify-end space-x-2">
+              <button 
+                onClick={() => setCommitModal({ isOpen: false, repoName: null, message: "" })}
+                className="px-3 py-1.5 text-sm font-medium text-gray-300 bg-[#21262d] border border-[rgba(240,246,252,0.1)] rounded-md hover:bg-[#30363d] transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={async () => {
+                   const finalMessage = commitModal.message.trim() || "Update files";
+                   const payload = { action: "push_repo", parameters: { message: finalMessage, name: commitModal.repoName } };
+                   setCommitModal({ isOpen: false, repoName: null, message: "" });
+                   
+                   setIsProcessing(true);
+                   setMessages(prev => [...prev, { id: Date.now(), type: "user", content: "Pushing changes...", timestamp: new Date() }]);
+                   try {
+                     const backendRes = await fetch("http://localhost:4000/ask", {
+                        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include",
+                        body: JSON.stringify(payload)
+                     });
+                     const data = await backendRes.json();
+                     if (data.success) {
+                        setActivityStream(prev => [{ id: Date.now(), action: "push_repo", message: "Successfully pushed changes", timestamp: new Date() }, ...prev]);
+                     }
+                     setMessages(prev => [...prev, { id: Date.now() + 1, type: data.success ? "assistant" : "error", content: data.aiResponse || data.error, timestamp: new Date() }]);
+                   } catch(e) { console.error(e); }
+                   setIsProcessing(false);
+                }}
+                disabled={isProcessing}
+                className="px-3 py-1.5 text-sm font-medium text-white bg-[#238636] border border-[rgba(240,246,252,0.1)] rounded-md hover:bg-[#2ea043] transition-colors"
+              >
+                Commit & Push
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

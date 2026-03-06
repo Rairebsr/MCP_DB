@@ -135,3 +135,28 @@ export async function uploadFileAndSync(workspaceId, filename, contentBase64) {
 
   return { path: relativePath, bytes: buffer.length, doc };
 }
+
+// 4. Delete File or Folder + Sync DB
+export async function deleteFileAndSync(workspaceId, relativePath) {
+  const targetPath = path.resolve(WORKSPACE, relativePath);
+
+  // Security check to ensure we don't accidentally delete outside the workspace
+  if (!targetPath.startsWith(WORKSPACE)) {
+    throw new Error("Invalid path: Cannot delete outside workspace bounds.");
+  }
+
+  // 1. Delete from the actual File System
+  // 'force: true' ensures it doesn't crash if the file is already gone
+  // 'recursive: true' allows it to delete folders and everything inside them
+  await fs.rm(targetPath, { recursive: true, force: true });
+
+  // 2. Clean up MongoDB
+  // We use a regex to delete the exact file, OR if it's a folder, all files inside it.
+  // We escape regex characters in the path just in case the folder has weird characters in its name.
+  const escapedPath = relativePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pathRegex = new RegExp(`^${escapedPath}(/|$)`);
+  
+  await File.deleteMany({ workspaceId, path: pathRegex });
+
+  return { success: true };
+}

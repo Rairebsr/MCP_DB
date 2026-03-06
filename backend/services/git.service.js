@@ -151,3 +151,30 @@ export async function switchBranch(workspacePath, branchName) {
     throw new Error(`Failed to switch branch: ${err.message}`);
   }
 }
+/**
+ * 4. Get Staged Diff for AI Commit Generation
+ */
+export async function getStagedDiff(workspacePath) {
+  const git = getGit(workspacePath);
+  try {
+    await git.add(".");
+    const diff = await git.diff(["--staged"]);
+    return diff;
+  } catch (err) {
+    return "";
+  }
+}
+
+/**
+ * 5. Get Merge Conflict Context (Recent Commits)
+ */
+export async function getMergeContext(workspacePath) {
+  const git = getGit(workspacePath);
+  try {
+    // Grab the last 5 commits to understand the recent architecture changes
+    const log = await git.log({ maxCount: 5 });
+    return log.all.map(commit => `- ${commit.message} (${commit.author_name})`).join("\n");
+  } catch (err) {
+    return "No commit history available.";
+  }
+}

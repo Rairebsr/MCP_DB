@@ -269,3 +269,9 @@ body {
     min-height: 300px;
   }
 }
+/* 🟢 AI Auto-Resolve Success Glow (BRUTE FORCE) */
+.monaco-editor .view-overlays .ai-success-glow,
+.monaco-editor .margin-view-overlays .ai-success-glow {
+  background-color: rgba(46, 160, 67, 0.4) !important;
+  transition: background-color 0.5s ease-out;
+}
