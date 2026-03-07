@@ -46,6 +46,8 @@ const App = () => {
   const [isCreatingFolder, setIsCreatingFolder] = useState(false); 
   const [newFolderName, setNewFolderName] = useState(""); 
 
+  const [agentTask, setAgentTask] = useState("");
+
   // 🧠 SMART CONTEXT SYNCRONIZATION
   // Automatically determine the active repo based on Editor OR Explorer
   useEffect(() => {
@@ -160,6 +162,7 @@ const App = () => {
     setConflictModal({ isOpen: false, instructions: "" }); 
 
     setIsProcessing(true);
+    setAgentTask("Gemini is analyzing conflict markers and surrounding code context..."); 
     
     // Visually notify the user we are working on it
     setMessages(prev => [...prev, {
@@ -581,6 +584,7 @@ const startRequest = () => ({
 
   setIsProcessing(true);
   setInputValue("");
+  setAgentTask("Parsing natural language intent..."); 
 
   try {
     let payload;
@@ -605,6 +609,7 @@ const startRequest = () => ({
 
     // Only ask the AI Router if we haven't manually intercepted the command
     if (!payload) {
+      setAgentTask("Routing command via Puter AI to find correct tool...");
       // 🧠 ALWAYS USE ROUTER MODE (Allow context switching)
       const chatHistory = messages
         .slice(-4)
@@ -680,6 +685,7 @@ const startRequest = () => ({
     }
 
     // 🚀 SEND TO ORCHESTRATOR
+    setAgentTask(`Executing ${payload.action} sequence in Orchestrator...`);
     const backendRes = await fetch("http://localhost:4000/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -964,6 +970,7 @@ const startRequest = () => ({
     if (branchName === repoBranches.current) return;
 
     setIsProcessing(true);
+    setAgentTask(`Fetching from GitHub and checking out branch: ${branchName}...`); 
     setMessages(prev => [...prev, { id: Date.now(), type: "user", content: `Switching to branch: ${branchName}`, timestamp: new Date() }]);
 
     try {
@@ -991,6 +998,7 @@ const startRequest = () => ({
     if (commitModal.isOpen && !commitModal.message) {
       const fetchAutoCommit = async () => {
         setIsGeneratingCommit(true);
+        setAgentTask("Gemini is analyzing Git diff to generate semantic commit...");
         try {
           const res = await fetch("http://localhost:4000/ask/generate-commit", {
             method: "POST",
@@ -1050,19 +1058,39 @@ const startRequest = () => ({
             {/* VIEW 1: ACTIVITY STREAM & SYSTEM STATUS */}
             {activeSidebarTab === 'activity' && (
               <div className="flex flex-col h-full overflow-hidden">
-                {/* Scrollable Activity List */}
-                <div className="flex-1 overflow-y-auto space-y-4 pr-2 scrollbar-thin scrollbar-thumb-gray-700">
+                
+                {/* 🧠 NEW: ACTIVE THINKING INDICATOR */}
+                {(isProcessing || isGeneratingCommit || isUploading) && (
+                  <div className="mx-2 mt-2 mb-3 p-3 bg-purple-900/20 border border-purple-500/30 rounded-lg shadow-[0_0_15px_rgba(147,51,234,0.15)] shrink-0 animate-in fade-in zoom-in duration-300">
+                    <div className="flex items-center gap-3">
+                      <div className="relative flex h-3 w-3 shrink-0">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-3 w-3 bg-purple-500"></span>
+                      </div>
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-[10px] font-bold text-purple-400 uppercase tracking-wider">DevMind Thinking...</span>
+                        <span className="text-[11px] text-purple-300/80 animate-pulse font-mono truncate">
+                          {agentTask || "Orchestrating background tasks..."}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 📜 Upgraded Scrollable Activity List */}
+                <div className="flex-1 overflow-y-auto space-y-3 px-2 scrollbar-thin scrollbar-thumb-gray-700">
                   {activityStream.length === 0 ? (
-                    <div className="text-xs text-gray-500 text-center mt-10">No recent activity</div>
+                    <div className="text-xs text-gray-500 text-center mt-10 font-mono">No recent activity</div>
                   ) : (
                     activityStream.map((item) => (
-                      <div key={item.id} className="flex items-start space-x-3 text-sm">
-                        <div className={`mt-0.5 ${item.action === 'conflict' ? 'text-yellow-500' : 'text-green-500'}`}>
-                          {item.action === 'conflict' ? '⚠️' : '✓'}
+                      <div key={item.id} className="flex items-start space-x-3 text-sm animate-in slide-in-from-left-2 duration-300 bg-gray-800/30 p-2 rounded-lg border border-gray-800/50">
+                        <div className={`mt-0.5 ${item.action === 'conflict' ? 'text-yellow-500' : item.action === 'error' ? 'text-red-500' : 'text-green-500'}`}>
+                          {item.action === 'conflict' ? '⚠️' : item.action === 'error' ? '❌' : '✓'}
                         </div>
-                        <div>
-                          <div className="text-gray-300 font-medium capitalize">{item.action.replace(/_/g, ' ')}</div>
-                          <div className="text-xs text-gray-500">{item.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-gray-300 font-bold capitalize text-[12px] tracking-wide">{item.action.replace(/_/g, ' ')}</div>
+                          <div className="text-[11px] text-gray-400 font-mono mt-1 leading-relaxed break-words">{item.message}</div>
+                          <div className="text-[9px] text-gray-600 mt-2 font-mono">{item.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>
                         </div>
                       </div>
                     ))
@@ -1070,9 +1098,8 @@ const startRequest = () => ({
                 </div>
 
                 {/* Relocated Mini-Analytics (Pinned to bottom) */}
-                <div className="pt-4 mt-4 border-t border-gray-800 shrink-0">
+                <div className="pt-4 mt-4 border-t border-gray-800 shrink-0 px-2">
                   <h3 className="font-semibold text-gray-500 text-[10px] uppercase tracking-wider mb-3">System Health</h3>
-                  
                   <div className="grid grid-cols-2 gap-2 mb-3">
                     <div className="bg-gray-800/50 p-2 rounded border border-gray-700/50 text-center">
                       <div className="text-sm font-bold text-green-400">{performanceData.successRate}%</div>
@@ -1085,7 +1112,6 @@ const startRequest = () => ({
                       <div className="text-gray-500 text-[8px] uppercase tracking-tighter">Latency</div>
                     </div>
                   </div>
-
                   <div className="space-y-1.5">
                     {['LLM Orchestrator', 'API Gateway'].map((service) => (
                       <div key={service} className="flex items-center justify-between px-2 py-1 bg-gray-800/30 rounded border border-gray-700/50">
