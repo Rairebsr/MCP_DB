@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "simple-git": "^3.31.1",
+    "uuid": "^9.0.1"
+  }
+}
