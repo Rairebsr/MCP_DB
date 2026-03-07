@@ -24,7 +24,6 @@ export async function generateResponse({
     clone_repo: "clone a GitHub repository",
     push_repo: "push changes to GitHub",
     pull_repo: "pull changes from GitHub",
-<<<<<<< HEAD
     create_branch: "create a new branch in a repository",
     switch_branch: "switch to a different branch in a repository",  
     read_file: "read a file from the workspace",
@@ -34,11 +33,6 @@ export async function generateResponse({
     list_files: "list files in the workspace",
     get_file_content: "get the content of a specific file",
     get_repo_info: "get information about a repository (like branches, commits, etc.)",
-=======
-    read_file: "read a file from the workspace",
-    write_file: "write content to a file or create a new file",
-    upload_file: "upload a file to the workspace"
->>>>>>> 645c2407935ab29c8db1fba7084f1d301267d81f
   };
 
   // 🔴 Clarification
@@ -138,17 +132,11 @@ Result:
 ${JSON.stringify(toolResult)}
 
 Rules:
-<<<<<<< HEAD
 - Respond clearly, naturally, and concisely (1-2 sentences max).
 - Confirm the result to the user.
 - 🚫 STRICT RULE: NEVER output absolute file paths (like D:\\...). Use ONLY the repository or folder name.
 - 🚫 STRICT RULE: NEVER output commit IDs or hashes.
 - Do NOT ask follow-up questions.
-=======
-- Respond clearly and naturally
-- Confirm the result
-- Do NOT ask follow-up questions
->>>>>>> 645c2407935ab29c8db1fba7084f1d301267d81f
 `;
   }
 
