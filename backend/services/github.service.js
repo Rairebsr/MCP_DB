@@ -1,4 +1,5 @@
 import fetch from "node-fetch";
+import { Octokit } from "@octokit/rest";
 
 const GITHUB_API_BASE = "https://api.github.com";
 
@@ -176,3 +177,112 @@ export async function repoExists(token, owner, repoName) {
 
   return response.status === 200;
 }
+
+// backend/services/git.service.js
+
+export async function pullRepo(localPath, token) {
+  const { default: simpleGit } = await import("simple-git");
+  const git = simpleGit(localPath);
+  const cleanToken = token.trim().replace(/\n|\r/g, "");
+
+  try {
+    // 1. Get the branch you are currently standing on
+    const status = await git.status();
+    const currentBranch = status.current; 
+
+    // 2. Force a clean remote URL (This fixes the "Double Token" from yesterday)
+    let remoteUrl = await git.remote(['get-url', 'origin']);
+    const cleanBaseUrl = remoteUrl.trim().replace(/https:\/\/.*@github\.com/, "https://github.com");
+    const authenticatedRemote = cleanBaseUrl.replace('https://', `https://${cleanToken}@`);
+    
+    await git.remote(['set-url', 'origin', authenticatedRemote]);
+
+    // 3. Save local work so the pull doesn't fail due to "Uncommitted changes"
+    if (status.files.length > 0) {
+      await git.add(".");
+      await git.commit("Auto-save before pull");
+    }
+
+    // 4. THE EXPLICIT PULL (Telling Git exactly what to do)
+    console.log(`📡 Pulling origin/${currentBranch} into ${localPath}`);
+    const pullResult = await git.pull('origin', currentBranch);
+    
+    // 5. Check for conflicts
+    const statusAfter = await git.status();
+    if (statusAfter.conflicted.length > 0) {
+      return {
+        success: false,
+        error: "MERGE_CONFLICT",
+        conflictedFiles: statusAfter.conflicted
+      };
+    }
+
+    return {
+      success: true,
+      files: pullResult.files || [],
+      summary: pullResult.summary || {}
+    };
+
+  } catch (err) {
+    console.error("Git Pull Error:", err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+
+export const getOctokit = (token) => {
+    return new Octokit({ auth: token });
+};
+
+export const githubPRService = {
+    // We use this to get the authenticated user's username (owner)
+    getAuthenticatedUser: async (octokit) => {
+        const { data } = await octokit.rest.users.getAuthenticated();
+        return data.login;
+    }
+};
+
+export const gitExtraService = {
+  // LIST BRANCHES
+  listBranches: async (localPath) => {
+    const { default: simpleGit } = await import("simple-git");
+    const git = simpleGit(localPath);
+    const branches = await git.branch();
+    return {
+      current: branches.current,
+      all: branches.all, // Array of branch names
+      details: branches.branches // Object with details per branch
+    };
+  },
+
+  // DELETE BRANCH
+  deleteBranch: async (localPath, branchName) => {
+    const { default: simpleGit } = await import("simple-git");
+    const git = simpleGit(localPath);
+    // '-d' is safe delete, '-D' is forced. We'll use '-d' by default.
+    return await git.deleteLocalBranch(branchName);
+  },
+
+  // LIST COMMITS
+  listCommits: async (localPath, branch = null, limit = 10) => {
+    const { default: simpleGit } = await import("simple-git");
+    const git = simpleGit(localPath);
+    
+    // 🔍 1. If no branch is provided, ask Git what the HEAD is
+    let targetBranch = branch;
+    if (!targetBranch || targetBranch === 'undefined') {
+        const branchInfo = await git.branch();
+        targetBranch = branchInfo.current; // This gets the actual active branch (e.g., 'main' or 'work')
+        console.log(`📡 No branch specified. Auto-detected current branch: ${targetBranch}`);
+    }
+
+    try {
+        // 📜 2. Get the log for that specific branch
+        const log = await git.log([targetBranch, `--max-count=${limit}`]);
+        return log.all; 
+    } catch (err) {
+        console.error("Git Log Error:", err.message);
+        return [];
+    }
+}
+};

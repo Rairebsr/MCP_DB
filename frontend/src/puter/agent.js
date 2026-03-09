@@ -52,6 +52,7 @@ GitHub actions:
 - create_pull_request
 - list_pull_requests
 - get_pull_request_diff
+-merge_pull_request
 
 File actions:
 - list_files
@@ -165,6 +166,57 @@ Do NOT apply it to create_repo or rename_repo.
 - Used when the user wants to create, switch, or checkout a branch.
 - Extract the target branch name as "branch" (e.g., "create branch feature-ui" -> branch: "feature-ui").
 - Extract the repository name as "name" if explicitly mentioned.
+
+──────────────── PULL_REPO RULES ────────────────
+
+- Used when the user wants to "pull", "sync", or "update from github".
+- If the user provides a name (e.g., "pull group13"), extract name: "group13".
+- If the user says "pull" or "update" without a name:
+  → Check conversation history for the most recent repository worked on.
+  → If found, extract that name.
+  → Otherwise, return "pull_repo" with EMPTY parameters so the agent can ask which repo.
+// Add this to your askPuter ROUTER_SYSTEM
+- ⚠️ SMART CONTEXT RULE: If the user recently created, cloned, or wrote a file inside a repository, and they ask to "pull" or "push" without a name, you MUST use that repository's name.
+
+──────────────── BRANCH & COMMIT RULES ────────────────
+
+list_branches:
+- Patterns: "show branches", "list branches", "what branches do I have?"
+- Parameters: "name" (repo name)
+- SMART CONTEXT: If no repo name, use the active repository.
+
+delete_branch:
+- Patterns: "delete branch X", "remove branch X", "get rid of branch X"
+- Parameters: "name" (repo name), "branch" (the branch name to kill)
+- CRITICAL: Ensure "branch" is extracted as a single string.
+
+list_commits:
+- Patterns: "show commits", "view history", "recent changes", "log"
+- Parameters: "name" (repo), "branch" (optional, defaults to current)
+- If user says "last 5 commits", set "limit": 5 if your backend supports it.
+──────────────── PULL REQUEST RULES ────────────────
+
+create_pull_request:
+- Patterns: "create pr", "open pull request", "new pr"
+- Requires: "title", "head" (source branch)
+- Optional: "base" (target branch, defaults to 'main'), "body" (description)
+- SMART CONTEXT: If user doesn't provide "head", check context for current branch.
+
+list_pull_requests:
+- Patterns: "list prs", "show pull requests", "view open prs"
+- Parameters: "name" (repo), "state" (open, closed, all)
+
+merge_pull_request:
+- Patterns: "merge pr", "accept pull request"
+- Requires: "pull_number", "name"
+- If user says "merge this pr", get "pull_number" from context if available.
+
+get_pull_request_diff:
+- Patterns: "show diff for pr", "what changed in pr", "review pr"
+- Requires: "pull_number", "name"
+
+PR CONTEXT RULE:
+If the user says "merge it" or "show the diff" and the last assistant message contained a list of PRs or a specific PR number, you MUST extract that pull_number.
 ──────────────── FILE RULES ────────────────
 
 list_files:

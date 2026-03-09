@@ -68,6 +68,42 @@ git_status: {
 switch_branch: {
     description: "Create a new branch or switch to an existing one",
     parameters: ["branch"]
-  }
+  },
 
+  // Add these to your export const githubCapabilities object
+
+  create_pull_request: {
+    description: "Create a new GitHub pull request to merge changes from one branch to another",
+    parameters: ["name", "title", "head", "base", "body"]
+  },
+
+  list_pull_requests: {
+    description: "List all open, closed, or all pull requests for a specific repository",
+    parameters: ["name", "state"]
+  },
+
+  get_pull_request_diff: {
+    description: "View the line-by-line code changes (diff) for a specific pull request",
+    parameters: ["name", "pull_number"]
+  },
+
+  merge_pull_request: {
+    description: "Merge an approved pull request into the target branch",
+    parameters: ["name", "pull_number", "commit_message"]
+  },
+
+  list_branches: {
+    description: "List all local and remote branches for a repository",
+    parameters: ["name"]
+  },
+
+  delete_branch: {
+    description: "Delete a branch from a local or remote repository",
+    parameters: ["name", "branch"]
+  },
+
+  list_commits: {
+    description: "View the commit history for a specific branch",
+    parameters: ["name", "branch"]
+  }
 };

@@ -33,7 +33,56 @@ export async function generateResponse({
     list_files: "list files in the workspace",
     get_file_content: "get the content of a specific file",
     get_repo_info: "get information about a repository (like branches, commits, etc.)",
+    create_pull_request: "create a new GitHub pull request",
+    list_pull_requests: "list open pull requests for a repository",
+    merge_pull_request: "merge a pull request into the target branch",
+    get_pull_request_diff: "view the code changes in a pull request",
+    list_branches: "list all local and remote branches",
+    delete_branch: "delete a branch from the repository",
+    list_commits: "view the commit history",
   };
+  //list branch and commit 
+
+  if ((action === "list_branches" || action === "list_commits") && mode === "action") {
+    prompt = `
+You are a helpful Git assistant for DevMind.
+The system successfully retrieved ${action === "list_branches" ? "branches" : "commits"}.
+
+Result Data:
+${JSON.stringify(toolResult)}
+
+Instructions for ${action}:
+${action === 'list_branches' ? `
+- Identify the "current" branch and clearly state it.
+- Mention how many total branches were found.
+- List a few other available branches.
+- Example: "You have 5 branches. You're currently on 'main', but 'dev' and 'feature-ui' are also available."` 
+: `
+- Summarize the most recent 3-5 commits only.
+- Use a "Timeline" style: [Message] by [Author] on [Date].
+- Keep it concise and skip the technical hashes.`}
+
+Rules:
+- Be natural and friendly.
+- Do NOT return raw JSON.
+`;
+  }
+  // 🟣 PR LIST MODE (Specific for rendering summaries)
+  if (action === "list_pull_requests" && mode === "action") {
+    prompt = `
+You are a development assistant for DevMind.
+The user requested a list of pull requests.
+
+Result Data:
+${JSON.stringify(toolResult)}
+
+Rules:
+- Summarize how many PRs were found.
+- Mention 1 or 2 titles of the most recent PRs.
+- State that the full list is available in the interactive cards below.
+- Keep it professional and helpful.
+`;
+  }
 
   // 🔴 Clarification
   if (mode === "clarification") {
@@ -59,40 +108,57 @@ If you want, you can also tell me whether it should be private, include a README
   }
 
   // 🟢 File result mode
-  else if (mode === "file") {
+  // 🟢 File Result Mode (Revised to avoid clashing)
+else if (mode === "file") {
+  // 🔍 Check if it's a PR action
+  if (action === "get_pull_request_diff" || action === "review_pull_request") {
     prompt = `
-You are a helpful assistant.
+You are a coding assistant. 
+The user is specifically reviewing code changes (diff) for a Pull Request.
 
-A file operation has completed successfully.
-
-Action:
-${action}
-
-Result:
-${JSON.stringify(toolResult)}
+Action: ${action}
+Diff Data: ${JSON.stringify(toolResult)}
 
 Rules:
-- Explain what happened in simple language
-- If the result contains text content, show it clearly
-- If the result is a list, present it neatly
-- Do NOT ask follow-up questions
-- Do NOT return JSON
+1. Summarize the changes: which files were added, deleted, or modified?
+2. Explain the technical impact: how do these changes affect the logic?
+3. Mention any potential bugs or improvements if you see them.
+4. Do NOT return JSON.
+`;
+  } 
+  // 🔍 Standard File Actions (Keep your original logic here)
+  else {
+    prompt = `
+You are a helpful assistant.
+A file operation has completed successfully.
+
+Action: ${action}
+Result: ${JSON.stringify(toolResult)}
+
+Rules:
+- Explain what happened in simple language.
+- If it's a list of files, present them neatly.
+- If it's the content of a file, show it clearly.
 `;
   }
+}
 
   // 🟠 Merge Conflict Mode (Specific Error)
   // ❗ CRITICAL: This must be BEFORE the generic error block
-  else if (mode === "error" && errorMessage && errorMessage.includes("MERGE_CONFLICT")) {
+  // 🟠 Merge Conflict Mode (Updated for Pull/Push)
+  else if (mode === "error" && errorMessage && (errorMessage.includes("MERGE_CONFLICT") || errorMessage.includes("CONFLICT"))) {
     prompt = `
 You are a coding assistant. 
-The user tried to push code, but a GIT MERGE CONFLICT occurred.
+A Git conflict occurred during a ${action === 'pull_repo' ? 'PULL' : 'PUSH'}.
 
 Conflicted Files: ${JSON.stringify(toolResult || errorMessage)}
 
 Your goal:
-1. Apologize briefly.
-2. List the files that are in conflict.
-3. Tell the user they can open the file, look for "<<<<<<< HEAD", fix it, and then ask you to "continue push".
+1. Explain that changes from GitHub and local changes crashed into each other.
+2. List the conflicted files.
+3. Suggest two options: 
+   - Option A: They can fix the markers (<<<<<<< HEAD) manually.
+   - Option B: They can simply ask YOU to "Resolve the conflicts using AI".
 `;
   }
 
@@ -134,9 +200,25 @@ ${JSON.stringify(toolResult)}
 Rules:
 - Respond clearly, naturally, and concisely (1-2 sentences max).
 - Confirm the result to the user.
+- If a PR was created, mention the PR number and that it's ready for review.
+- If a PR was merged, confirm the branch is now updated.
+- 🚫 STRICT RULE: NEVER output full URLs unless it's a GitHub PR/Commit link the user needs to click.
 - 🚫 STRICT RULE: NEVER output absolute file paths (like D:\\...). Use ONLY the repository or folder name.
 - 🚫 STRICT RULE: NEVER output commit IDs or hashes.
 - Do NOT ask follow-up questions.
+
+    ──────────────── SPECIFIC ACTION RULES ────────────────
+
+${action === 'delete_branch' ? `
+- If the result shows SUCCESS: Confirm the branch is gone. 
+- If the result shows FAILURE: Explain that Git won't let you delete the branch you are currently "standing" on. Suggest they switch to 'main' first.
+` : ""}
+
+${action === 'merge_pull_request' ? `
+- Celebrate the successful merge! 
+- Mention that the code is now officially part of the target branch.
+` : ""}
+
 `;
   }
 

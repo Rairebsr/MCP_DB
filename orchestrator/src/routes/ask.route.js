@@ -137,6 +137,8 @@ router.post("/", async (req, res) => {
       let repoUrl = req.body.repo_url ?? parameters.repo_url ?? parameters.url;
       let targetName = req.body.local_path ?? parameters.local_path ?? parameters.name ?? parameters.repository;
 
+      const workspace = await Workspace.findOne({ userId: req.userId });
+
       // Smart Lookup: Name provided but no URL? Find it.
       if (!repoUrl && targetName) {
         try {
@@ -161,6 +163,25 @@ router.post("/", async (req, res) => {
       }
 
       const result = await cloneRepo(repoUrl, targetName, token);
+
+      if (workspace) {
+    const WORKSPACE_ROOT = path.resolve(process.cwd(), "..", "mcp_workspace");
+    const folderName = targetName || repoUrl.split('/').pop().replace('.git', '');
+    
+    await Repo.findOneAndUpdate(
+        { workspaceId: workspace._id, url: repoUrl }, // Match by URL
+        { 
+            workspaceId: workspace._id,
+            url: repoUrl,
+            localPath: path.resolve(WORKSPACE_ROOT, folderName),
+            cloned: true,
+            branch: "main", 
+            updatedAt: new Date()
+        },
+        { upsert: true, new: true } // Creates it if it doesn't exist!
+    );
+    console.log(`✅ Saved ${folderName} to database.`);
+}
 
       const aiText = await generateResponse({
         mode: "action",
@@ -627,6 +648,242 @@ router.post("/", async (req, res) => {
       return res.json({ success: true, aiResponse: aiText });
     }
 
+    // ------------------------------------------------------------------
+    // 8️⃣ PULL REPO (AI-INTEGRATED CONFLICT HANDLING)
+    // ------------------------------------------------------------------
+    if (resolvedAction === "pull_repo") {
+      let repoName = req.body.name ?? parameters.name ?? parameters.repository;
+      const ROOT_WORKSPACE = path.resolve(process.cwd(), "..", "mcp_workspace");
+      let workspacePath = null;
+      let repoDoc = null;
+
+      const workspace = await Workspace.findOne({ userId: req.userId });
+      
+      // Smart Lookup (Matches push_repo logic)
+      if (workspace) {
+        const normalize = (str) => str ? str.toLowerCase().replace(/[-_\s]/g, "") : "";
+        const searchName = normalize(repoName);
+        const allRepos = await Repo.find({ workspaceId: workspace._id });
+        repoDoc = allRepos.find(r => normalize(r.localPath).includes(searchName));
+        
+        if (repoDoc) workspacePath = repoDoc.localPath;
+        else if (!repoName && workspace.activeRepoId) {
+          repoDoc = await Repo.findById(workspace.activeRepoId);
+          if (repoDoc) workspacePath = repoDoc.localPath;
+        }
+      }
+
+      if (!workspacePath) throw new Error("Repository path not found.");
+
+      // Hit the backend pull-repo route
+      const response = await fetch("http://localhost:5000/api/actions/pull-repo", {
+      method: "POST",
+      headers: backendHeaders,
+      // 🟢 FIXED: Extract the folder name from the localPath stored in DB
+      // This converts "D:\...\mcp_workspace\sample" into "sample"
+      body: JSON.stringify({ 
+        name: repoName || repoDoc?.localPath.split(/[\\/]/).pop() 
+      })
+    });
+
+      const result = await response.json();
+      console.log("📡 ORCHESTRATOR RECEIVED FROM BACKEND:", result);
+
+      // 🎯 SMART FLOW TRIGGER: Specifically catch the MERGE_CONFLICT error
+    if (result.error === "MERGE_CONFLICT") {
+        if (workspace) {
+            await PendingAction.create({
+                workspaceId: workspace._id,
+                type: "merge_conflict",
+                stage: "resolution_needed",
+                data: { 
+                    files: result.conflictedFiles, 
+                    repoPath: workspacePath,
+                    sourceAction: "pull" 
+                }
+            });
+        }
+        const repoFolderName = repoDoc.localPath.split(/[\\/]/).pop();
+    const relativeFilePath = `${repoFolderName}/${result.conflictedFiles[0]}`;
+
+    // Read the file with markers so Gemini can see them
+    const fileContentWithMarkers = await fs.readFile(
+        path.join(repoDoc.localPath, result.conflictedFiles[0]), 
+        'utf-8'
+    );
+
+        // Return this structured JSON so the frontend shows the ✨ Resolve button
+        return res.json({
+        success: false, // Mark as false so the frontend knows it's an intervention
+        error: "MERGE_CONFLICT",
+        conflictedFiles: result.conflictedFiles,
+        editorData: {
+            path: relativeFilePath,
+            content: fileContentWithMarkers
+        },
+        aiResponse: `⚠️ I've detected a conflict in **${result.conflictedFiles[0]}**. I've opened the file for you—just click the **✨ Auto-Resolve** button to fix it!`
+    });
+    }
+
+    // 🛑 GENERIC ERROR: If it's not a merge conflict but still failed
+    if (!response.ok) {
+        throw new Error(result.error || "Pull failed");
+    }
+
+    // ✅ SUCCESS: Generate a natural AI confirmation
+    const aiText = await generateResponse({
+        mode: "action",
+        action: "pull_repo",
+        toolResult: { 
+            status: "Successfully synced with remote", 
+            filesChanged: result.files?.length || 0 
+        }
+    });
+
+    return res.json({ success: true, aiResponse: aiText });
+    }
+
+    // 1. CREATE PR
+// 1. CREATE PR
+if (resolvedAction === "create_pull_request") {
+    const { title, head, base, body, name } = parameters;
+    let repoName = name || req.body.activeRepoName; // ✅ Use req.body context
+
+    if (!head) {
+        return res.json({ success: false, aiResponse: "I need to know the 'head' branch to create a PR." });
+    }
+
+    const response = await fetch("http://localhost:5000/api/actions/create-pr", {
+        method: "POST",
+        headers: backendHeaders,
+        body: JSON.stringify({
+            repoName: repoName?.replace(/\s\(repo\)$/i, ""),
+            title: title || `Update: ${new Date().toLocaleDateString()}`,
+            head,
+            base: base || "main",
+            body
+        })
+    });
+    const result = await response.json();
+    return res.json({ 
+        success: response.ok, 
+        aiResponse: await generateResponse({ mode: "action", action: "create_pull_request", toolResult: result }) 
+    });
+}
+
+// 2. LIST PRS
+if (resolvedAction === "list_pull_requests") {
+    const { name, state } = parameters;
+    let repoName = name || req.body.activeRepoName; // ✅ Use req.body context
+
+    const response = await fetch("http://localhost:5000/api/actions/list-prs", {
+        method: "POST",
+        headers: backendHeaders,
+        body: JSON.stringify({
+            repoName: repoName?.replace(/\s\(repo\)$/i, ""),
+            state: state || "open"
+        })
+    });
+    const result = await response.json();
+    return res.json({ 
+        success: true, 
+        data: { type: "pull_requests", prs: result }, 
+        aiResponse: `I found ${result.length} open pull requests in ${repoName}.` 
+    });
+}
+
+// 3. MERGE PR
+if (resolvedAction === "merge_pull_request") {
+    const { pull_number, name } = parameters;
+    let repoName = name || req.body.activeRepoName; // ✅ Use req.body context
+
+    const response = await fetch("http://localhost:5000/api/actions/merge-pr", {
+        method: "POST",
+        headers: backendHeaders,
+        body: JSON.stringify({ 
+            repoName: repoName?.replace(/\s\(repo\)$/i, ""), 
+            pullNumber: pull_number 
+        })
+    });
+    const result = await response.json();
+    return res.json({ 
+        success: response.ok, 
+        aiResponse: await generateResponse({ mode: "action", action: "merge_pull_request", toolResult: result }) 
+    });
+}
+
+// 4. DELETE BRANCH
+if (resolvedAction === "delete_branch") {
+    const { branch, name } = parameters;
+    let repoName = name || req.body.activeRepoName; // ✅ Use req.body context
+
+    if (!branch) return res.json({ success: false, aiResponse: "Which branch should I delete?" });
+
+    const response = await fetch("http://localhost:5000/api/actions/delete-branch", {
+        method: "POST",
+        headers: backendHeaders,
+        body: JSON.stringify({ 
+            name: repoName?.replace(/\s\(repo\)$/i, ""), 
+            branch 
+        })
+    });
+    const result = await response.json();
+    return res.json({ 
+        success: response.ok, 
+        aiResponse: await generateResponse({ mode: "action", action: "delete_branch", toolResult: result }) 
+    });
+}
+// 📦 LIST BRANCHES
+if (resolvedAction === "list_branches") {
+    // 🔍 Match the pull/push logic: AI param OR Frontend Active Repo
+    let repoName = parameters.name || req.body.activeRepoName; 
+
+    if (!repoName) {
+        return res.json({ success: false, aiResponse: "I'm not sure which repo to check. Please select one first." });
+    }
+
+    const response = await fetch("http://localhost:5000/api/actions/list-branches", {
+        method: "POST",
+        headers: backendHeaders,
+        body: JSON.stringify({ name: repoName.replace(/\s\(repo\)$/i, "") }) 
+    });
+    
+    const result = await response.json();
+
+    return res.json({ 
+        success: true, 
+        data: { type: "branches", ...result },
+        aiResponse: `I found ${result.all?.length || 0} branches in **${repoName}**.`
+    });
+}
+
+// 📜 LIST COMMITS
+if (resolvedAction === "list_commits") {
+    // 🔍 Match the pull/push logic
+    let repoName = parameters.name || req.body.activeRepoName;
+
+    if (!repoName) {
+        return res.json({ success: false, aiResponse: "Which repository's history should I show?" });
+    }
+
+    const response = await fetch("http://localhost:5000/api/actions/list-commits", {
+        method: "POST",
+        headers: backendHeaders,
+        body: JSON.stringify({ 
+            name: repoName.replace(/\s\(repo\)$/i, ""), 
+            branch: parameters.branch || "main" 
+        })
+    });
+    
+    const result = await response.json();
+
+    return res.json({ 
+        success: true, 
+        data: { type: "commits", commits: result },
+        aiResponse: `Here are the latest commits for **${repoName}**.`
+    });
+}
+
     // Default Fallback
     return res.status(400).json({ success: false, error: "Action not implemented" });
 
@@ -830,5 +1087,7 @@ router.post("/list-branches", async (req, res) => {
     res.json({ success: false, error: err.message });
   }
 });
+
+
 
 export default router;

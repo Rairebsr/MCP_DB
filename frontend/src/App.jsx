@@ -395,7 +395,58 @@ const handleFileUpload = async (file) => {
     setInputValue(e.target.value);
   };
 
-  const renderMessageContent = (content, type) => {
+  const renderMessageContent = (content, type, data) => {
+    // ✅ NEW Case: Commits (Git History)
+  if (type === "commits") {
+    // Determine if commits are in data.commits or just data
+    const commitsArray = data?.commits || (Array.isArray(data) ? data : []);
+
+    if (commitsArray.length === 0) {
+      return <p className="text-gray-500 italic text-xs">No commits found or repository empty.</p>;
+    }
+
+    return (
+      <div className="mt-2 space-y-3 border-l-2 border-blue-500 pl-4 py-1">
+        <p className="text-blue-400 text-sm font-semibold mb-2">{content}</p>
+        {commitsArray.map((commit, index) => (
+          <div key={index} className="bg-gray-800/40 p-2 rounded border border-gray-700">
+            <div className="flex justify-between items-center mb-1">
+              <span className="text-blue-300 font-mono text-[10px]">
+                {commit.hash?.substring(0, 7) || "No Hash"}
+              </span>
+              <span className="text-[10px] text-gray-500">
+                {commit.date ? new Date(commit.date).toLocaleDateString() : ""}
+              </span>
+            </div>
+            <p className="text-gray-200 text-sm">{commit.message}</p>
+            <p className="text-gray-500 text-[10px] mt-1">By {commit.author_name || "Unknown"}</p>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  // ✅ NEW Case: Branches
+  if (type === "branches" && data?.all) {
+    return (
+      <div className="mt-2 grid grid-cols-1 gap-2">
+        <p className="text-xs text-gray-400 mb-1">Available Branches:</p>
+        {data.all.map((branch) => (
+          <div 
+            key={branch} 
+            className={`flex items-center justify-between p-2 rounded text-sm border ${
+              branch === data.current 
+              ? 'border-green-500 bg-green-900/20 text-green-400' 
+              : 'border-gray-700 bg-gray-800/40 text-gray-300'
+            }`}
+          >
+            <span>{branch}</span>
+            {branch === data.current && <span className="text-[10px] font-bold uppercase tracking-wider bg-green-500 text-black px-1 rounded">Active</span>}
+          </div>
+        ))}
+      </div>
+    );
+  }
   // ✅ Case 0: Repo list (structured data)
   if (type === "repos" && Array.isArray(content)) {
     return (
@@ -684,6 +735,13 @@ const startRequest = () => ({
       }
     }
 
+    // Inside handleSubmit, add this alongside your 'push' interceptor:
+    if (lowerInput === "pull" || lowerInput === "sync" || lowerInput.startsWith("git pull")) {
+        handleManualPull(activeRepository); // 👈 Uses the Smart State context
+        setIsProcessing(false);
+        return;
+    }
+
     // 🚀 SEND TO ORCHESTRATOR
     setAgentTask(`Executing ${payload.action} sequence in Orchestrator...`);
     const backendRes = await fetch("http://localhost:4000/ask", {
@@ -751,6 +809,7 @@ const startRequest = () => ({
       id: Date.now(),
       type: data.success ? "assistant" : "error",
       content: data.aiResponse || data.error || "Action finished invisibly.",
+      data: data.data,
       timestamp: new Date()
     }]);
 
@@ -1021,6 +1080,67 @@ const startRequest = () => ({
       fetchAutoCommit();
     }
   }, [commitModal.isOpen, commitModal.repoName]);
+
+  // 🔄 Manual Pull/Sync Function
+const handleManualPull = async (repoName) => {
+  if (!repoName || isProcessing) return;
+
+  const payload = { 
+    action: "pull_repo", 
+    parameters: { name: repoName } 
+  };
+
+  setIsProcessing(true);
+  setAgentTask(`Pulling latest changes for ${repoName}...`);
+  setMessages(prev => [...prev, { 
+    id: Date.now(), 
+    type: "user", 
+    content: `Syncing ${repoName} with GitHub...`, 
+    timestamp: new Date() 
+  }]);
+
+  try {
+    const res = await fetch("http://localhost:4000/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+
+    if (data.success) {
+      setActivityStream(prev => [{ 
+        id: Date.now(), 
+        action: "pull_repo", 
+        message: `Successfully synced ${repoName}`, 
+        timestamp: new Date() 
+      }, ...prev]);
+    }
+
+    // Handle potential merge conflicts found during pull
+    if (data.error === "MERGE_CONFLICT") {
+       setActivityStream(prev => [{
+        id: Date.now(),
+        action: "conflict",
+        message: `Merge conflict during pull in ${repoName}`,
+        timestamp: new Date()
+      }, ...prev]);
+    }
+
+    setMessages(prev => [...prev, { 
+      id: Date.now() + 1, 
+      type: data.success ? "assistant" : "error", 
+      content: data.aiResponse || data.error, 
+      timestamp: new Date() 
+    }]);
+
+  } catch (err) {
+    console.error("Pull Error:", err);
+  } finally {
+    setIsProcessing(false);
+  }
+};
 
   return (
   <div className="flex h-screen bg-gray-900 text-white overflow-hidden">
@@ -1327,7 +1447,7 @@ const startRequest = () => ({
             {messages.map((message) => (
               <div key={message.id} className="flex flex-col mb-2">
                 <div className={getMessageStyles(message.type)}>
-                  {renderMessageContent(message.content, message.type)}
+                  {renderMessageContent(message.content,message.data?.type, message.data)}
                 </div>
                 <div className={`text-xs text-gray-500 mt-1 ${message.type === 'user' ? 'text-right mr-2' : 'ml-2'}`}>
                   {message.timestamp.toLocaleTimeString()}
@@ -1579,7 +1699,8 @@ const startRequest = () => ({
                 <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-3">Quick Actions</h3>
                 <div className="grid grid-cols-2 gap-3">
                   <button 
-                    onClick={() => setInputValue("git pull")}
+                    onClick={() =>  handleManualPull(activeRepository)}
+                    disabled={!activeRepository || isProcessing}
                     className="flex flex-col items-center justify-center py-4 px-2 bg-gray-800/40 hover:bg-gray-700 border border-gray-700 rounded-xl transition-all hover:border-blue-500/50 group"
                   >
                     <span className="text-xl mb-2 group-hover:-translate-y-1 transition-transform">⬇️</span>

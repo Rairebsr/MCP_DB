@@ -1,11 +1,21 @@
 import Repo from "../models/Repo.js";
 import Workspace from "../models/Workspace.js";
-import { createRepo, renameRepo, deleteRepo,listRepos,getRepoDetails,repoExists,updateRepo} from "../services/github.service.js";
+import { createRepo, renameRepo, deleteRepo,listRepos,getRepoDetails,repoExists,updateRepo,pullRepo} from "../services/github.service.js";
 import express from 'express'
 import { cloneRepo } from "../services/git.service.js";
 import path from "path";
+import { getOctokit, githubPRService,gitExtraService } from "../services/github.service.js";
 
 const router = express.Router();
+
+// Helper for all Git/PR actions
+const findRepoByName = async (userId, name) => {
+    const workspace = await Workspace.findOne({ userId });
+    const allRepos = await Repo.find({ workspaceId: workspace._id });
+    const repo = allRepos.find(r => r.localPath.toLowerCase().includes(name.toLowerCase()));
+    if (!repo) throw new Error(`Repository '${name}' not found in your workspace.`);
+    return repo;
+};
 
 
 router.post("/create-repo", async (req, res, next) => {
@@ -43,6 +53,7 @@ router.post("/create-repo", async (req, res, next) => {
 
     // 3️⃣ Save Repo in DB
     const WORKSPACE_ROOT = path.resolve(process.cwd(), "..", "mcp_workspace");
+    console.log("Attempting to save to DB for workspace:", workspace._id);
     const repoDoc = await Repo.create({
       workspaceId: workspace._id,
       url: repo.html_url,
@@ -51,7 +62,7 @@ router.post("/create-repo", async (req, res, next) => {
       cloned: true,
       lastCommit: null
     });
-
+console.log("Successfully saved Repo ID:", repoDoc._id);
     // 🟢 NEW: Set this as the active repo in the workspace
     await Workspace.findByIdAndUpdate(workspace._id, { activeRepoId: repoDoc._id });
 
@@ -316,6 +327,187 @@ router.post("/set-active-repo", async (req, res, next) => {
     res.json({ success: true });
   } catch (err) {
     next(err);
+  }
+});
+
+router.post("/pull-repo", async (req, res, next) => {
+  try {
+    const { name } = req.body;
+    const token = req.headers["x-github-token"];
+    
+    const workspace = await Workspace.findOne({ userId: req.userId });
+    if (!workspace) return res.status(404).json({ error: "Workspace not found" });
+
+    const allRepos = await Repo.find({ workspaceId: workspace._id });
+    // Normalize path comparison
+    const repoDoc = allRepos.find(r => r.localPath.toLowerCase().includes(name.toLowerCase()));
+    
+    if (!repoDoc) return res.status(404).json({ error: "Repository not tracked in DB" });
+
+    // 1. 🚀 Call the Git Service
+    const result = await pullRepo(repoDoc.localPath, token);
+
+    // 🎯 CHECK RESULT STATUS
+// Use .includes() because Git error messages are long strings
+if (!result.success && (result.error === "MERGE_CONFLICT" || String(result.error).includes("CONFLICT"))) {
+  return res.status(409).json({
+    success: false,
+    error: "MERGE_CONFLICT", // 👈 Force the string to be EXACTLY this for the orchestrator
+    conflictedFiles: result.conflictedFiles || ["Hello.java"],
+    currentBranch: result.currentBranch
+  });
+}
+
+    // 3. Update DB only on actual success
+    if (result.success && result.summary && result.summary.hash) {
+      await Repo.findByIdAndUpdate(repoDoc._id, { 
+        lastCommit: result.summary.hash,
+        updatedAt: new Date()
+      });
+    }
+
+    res.json(result);
+
+  } catch (err) {
+    // This catches unexpected system errors (e.g., folder permissions)
+    console.error("🔥 Backend Pull Error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// CREATE A PULL REQUEST
+router.post("/create-pr", async (req, res, next) => {
+    try {
+        const { repoName, title, head, base, body } = req.body;
+        const token = req.headers["x-github-token"];
+        
+        if (!token) return res.status(401).json({ error: "GitHub token missing" });
+        
+        const octokit = getOctokit(token);
+        const owner = await githubPRService.getAuthenticatedUser(octokit);
+
+        const response = await octokit.rest.pulls.create({
+            owner,
+            repo: repoName,
+            title,
+            head, // Branch with your changes
+            base: base || 'main', // Branch you want to merge into
+            body: body || '🚀 Created via DevMind AI'
+        });
+
+        res.json({ 
+            success: true, 
+            pr_url: response.data.html_url, 
+            number: response.data.number,
+            state: response.data.state
+        });
+    } catch (err) {
+        console.error("PR Creation Error:", err.response?.data || err.message);
+        res.status(err.status || 500).json({ error: err.response?.data?.message || err.message });
+    }
+});
+
+// LIST PULL REQUESTS
+router.post("/list-prs", async (req, res, next) => {
+    try {
+        const { repoName, state = 'open' } = req.body;
+        const token = req.headers["x-github-token"];
+
+        const octokit = getOctokit(token);
+        const owner = await githubPRService.getAuthenticatedUser(octokit);
+
+        const response = await octokit.rest.pulls.list({
+            owner,
+            repo: repoName,
+            state
+        });
+
+        res.json(response.data.map(pr => ({
+            number: pr.number,
+            title: pr.title,
+            state: pr.state,
+            url: pr.html_url,
+            head: pr.head.ref,
+            base: pr.base.ref,
+            user: pr.user.login
+        })));
+    } catch (err) {
+        next(err);
+    }
+});
+
+// MERGE A PULL REQUEST
+router.post("/merge-pr", async (req, res, next) => {
+    try {
+        const { repoName, pullNumber, commitMessage } = req.body;
+        const token = req.headers["x-github-token"];
+        
+        const octokit = getOctokit(token);
+        const owner = await githubPRService.getAuthenticatedUser(octokit);
+
+        const response = await octokit.rest.pulls.merge({
+            owner,
+            repo: repoName,
+            pull_number: pullNumber,
+            commit_title: commitMessage || `Merged PR #${pullNumber} via DevMind`,
+            merge_method: 'squash' // Prefer squash for clean history
+        });
+
+        res.json({ success: true, message: response.data.message, sha: response.data.sha });
+    } catch (err) {
+        res.status(err.status || 500).json({ error: err.response?.data?.message || err.message });
+    }
+});
+
+// LIST BRANCHES
+router.post("/list-branches", async (req, res, next) => {
+  try {
+    const { name } = req.body;
+    const repoDoc = await findRepoByName(req.userId, name);
+    const result = await gitExtraService.listBranches(repoDoc.localPath);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// LIST COMMITS
+router.post("/list-commits", async (req, res, next) => {
+  try {
+    const { name, branch } = req.body;
+    
+    // 🔍 1. Find the repo in DB to get the localPath
+    const repoDoc = await findRepoByName(req.userId, name);
+    
+    // 🔍 2. Call the updated service
+    // If branch is undefined/empty, the service defaults to 'main'
+    const result = await gitExtraService.listCommits(repoDoc.localPath, branch || 'main');
+    
+    console.log(`✅ Found ${result.length} commits for ${name}`);
+    res.json(result);
+  } catch (err) { 
+    console.error("Route Error /list-commits:", err.message);
+    next(err); 
+  }
+});
+
+//DELETE BRANCH
+
+router.post("/delete-branch", async (req, res, next) => {
+  try {
+    const { name, branch } = req.body;
+    const repoDoc = await findRepoByName(req.userId, name);
+
+    // Safety Check: Get current branch first
+    const status = await gitExtraService.listBranches(repoDoc.localPath);
+    if (status.current === branch) {
+      return res.status(400).json({ 
+        error: `Cannot delete branch '${branch}' because you are currently on it. Switch to another branch first.` 
+      });
+    }
+
+    const result = await gitExtraService.deleteBranch(repoDoc.localPath, branch);
+    res.json({ success: true, branch, result });
+  } catch (err) { 
+    res.status(500).json({ error: err.message });
   }
 });
 
