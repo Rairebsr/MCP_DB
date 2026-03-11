@@ -105,5 +105,12 @@ switch_branch: {
   list_commits: {
     description: "View the commit history for a specific branch",
     parameters: ["name", "branch"]
+  },
+
+  create_branch: {
+    description: "Create a new branch in a repository and optionally switch to it",
+    parameters: ["name", "branch_name", "checkout"]
   }
 };
+
+

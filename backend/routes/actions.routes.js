@@ -455,8 +455,16 @@ router.post("/merge-pr", async (req, res, next) => {
 
         res.json({ success: true, message: response.data.message, sha: response.data.sha });
     } catch (err) {
-        res.status(err.status || 500).json({ error: err.response?.data?.message || err.message });
+    if (err.status === 405 || err.status === 409) {
+        // 🚩 This is a conflict!
+        return res.status(409).json({ 
+            success: false, 
+            error: "MERGE_CONFLICT",
+            message: "Cannot merge automatically. There are conflicts that must be resolved first." 
+        });
     }
+    res.status(500).json({ error: err.message });
+}
 });
 
 // LIST BRANCHES
@@ -508,6 +516,42 @@ router.post("/delete-branch", async (req, res, next) => {
     res.json({ success: true, branch, result });
   } catch (err) { 
     res.status(500).json({ error: err.message });
+  }
+});
+
+// CREATE BRANCH
+router.post("/create-branch", async (req, res, next) => {
+  try {
+    const { name, branchName } = req.body;
+    
+    // 🔍 1. Find the repository document to get the absolute local path
+    const repoDoc = await findRepoByName(req.userId, name);
+    if (!repoDoc) return res.status(404).json({ error: "Repository not found" });
+
+    // 🚀 2. Call the Atomic "Create and Switch" Service
+    // This physically moves the .git/HEAD and returns the new file list
+    const result = await gitExtraService.createAndSwitchBranch(
+        repoDoc.localPath, 
+        branchName
+    );
+
+    // 💾 3. Update the Database immediately to stay in sync
+    await Repo.findByIdAndUpdate(repoDoc._id, { 
+        branch: result.currentBranch, 
+        updatedAt: new Date() 
+    });
+
+    // 📤 4. Return everything (status, current branch, and files)
+    res.json({
+        success: true,
+        branch: result.currentBranch,
+        files: result.files,
+        message: `Successfully created and moved to branch: ${result.currentBranch}`
+    });
+
+  } catch (err) {
+    console.error("Route Error (Create-Branch):", err.message);
+    res.status(400).json({ success: false, error: err.message });
   }
 });
 

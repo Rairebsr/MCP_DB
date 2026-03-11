@@ -1,5 +1,7 @@
 import fetch from "node-fetch";
 import { Octokit } from "@octokit/rest";
+import { listFilesAndSync as listFilesService } from "./fs.service.js";
+
 
 const GITHUB_API_BASE = "https://api.github.com";
 
@@ -284,5 +286,62 @@ export const gitExtraService = {
         console.error("Git Log Error:", err.message);
         return [];
     }
+},
+
+// Inside gitExtraService...
+createBranch: async (localPath, branchName, checkout = true) => {
+    const { default: simpleGit } = await import("simple-git");
+    const git = simpleGit(localPath);
+
+    try {
+        // Check if branch exists
+        const branchSummary = await git.branch();
+        if (branchSummary.all.includes(branchName)) {
+            throw new Error(`Branch '${branchName}' already exists.`);
+        }
+
+        // Create the branch. If checkout is true, it uses '-b' to switch immediately
+        if (checkout) {
+            await git.checkoutLocalBranch(branchName);
+        } else {
+            await git.branch([branchName]);
+        }
+
+        return { success: true, branch: branchName, checkedOut: checkout };
+    } catch (err) {
+        console.error("Git Create Branch Error:", err.message);
+        throw err;
+    }
 }
+};
+
+// backend/services/git.service.js
+
+export const createAndSwitchBranch = async (repoPath, branchName, workspaceId) => {
+    if (!repoPath || !branchName) throw new Error("Path or Branch Name missing");
+
+    const { default: simpleGit } = await import("simple-git");
+    const git = simpleGit(repoPath); 
+
+    try {
+        const branchSummary = await git.branch();
+        
+        if (branchSummary.all.includes(branchName)) {
+            await git.checkout(branchName);
+        } else {
+            await git.checkoutLocalBranch(branchName);
+            
+            // 🟢 THE SYNC FIX: Push the new branch to GitHub immediately
+            // '-u' tracks the remote branch so future pulls work
+            console.log(`📡 Syncing new branch ${branchName} to GitHub...`);
+            await git.push(['-u', 'origin', branchName]);
+        }
+
+        const status = await git.status();
+        const files = await listFilesService(workspaceId, repoPath);
+
+        return { success: true, currentBranch: status.current, files };
+    } catch (err) {
+        throw new Error(`Git Branch Error: ${err.message}`);
+    }
 };

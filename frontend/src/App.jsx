@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { askPuter } from './puter/agent';
 import Editor from "@monaco-editor/react";
+import { toast,Toaster } from 'react-hot-toast'; 
 
 
 const App = () => {
@@ -396,6 +397,47 @@ const handleFileUpload = async (file) => {
   };
 
   const renderMessageContent = (content, type, data) => {
+
+    if (type === "pull_requests") {
+      const prsArray = Array.isArray(data?.prs) ? data.prs : [];
+    if (prsArray.length === 0) {
+      return <p className="text-gray-500 italic text-xs">No open pull requests found.</p>;
+    }
+
+    return (
+      <div className="mt-2 space-y-3">
+        <p className="text-purple-400 text-sm font-semibold mb-2">Open Pull Requests</p>
+        {prsArray.map((pr) => (
+          <div key={pr.number} className="bg-gray-800/60 p-3 rounded-lg border border-gray-700 shadow-sm">
+            <div className="flex justify-between items-start mb-2">
+              <div>
+                <span className="text-purple-400 font-bold mr-2">#{pr.number}</span>
+                <span className="text-gray-100 font-medium">{pr.title}</span>
+              </div>
+              <a href={pr.url} target="_blank" rel="noreferrer" className="text-blue-400 text-xs hover:underline">
+                View ↗
+              </a>
+            </div>
+            
+            <div className="flex items-center gap-2 text-[10px] mb-3">
+              <span className="bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded border border-blue-800/50">{pr.head}</span>
+              <span className="text-gray-500">→</span>
+              <span className="bg-gray-700 text-gray-300 px-2 py-0.5 rounded border border-gray-600/50">{pr.base}</span>
+              <span className="text-gray-500 ml-auto">by {pr.user}</span>
+            </div>
+
+            {/* 🔘 The Merge Button */}
+            <button 
+              onClick={() => handleMergePR(pr.number, pr.title)}
+              className="w-full py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold rounded transition-colors"
+            >
+              Merge Pull Request
+            </button>
+          </div>
+        ))}
+      </div>
+    );
+  }
     // ✅ NEW Case: Commits (Git History)
   if (type === "commits") {
     // Determine if commits are in data.commits or just data
@@ -515,6 +557,18 @@ const startRequest = () => ({
     endTime: performance.now(),
     success
   });
+
+  // Inside your Main Component (e.g., Chat.jsx)
+
+const handleMergePR = async (prNumber, prTitle) => {
+  setConfirmDialog({
+    isOpen: true,
+    text: `Are you sure you want to MERGE Pull Request #${prNumber}: "${prTitle}"?`,
+    type: "merge_pr",
+    data: { prNumber }
+  });
+};
+
   // 🔘 Handles clicks from the Confirmation Modal
   const handleDialogResponse = async (answer) => {
     // 1. Capture current modal data before closing it
@@ -524,7 +578,7 @@ const startRequest = () => ({
     setConfirmDialog({ isOpen: false, text: "", type: null, data: null }); // Close modal immediately
     
     // 🟢 2. NEW: Intercept Direct File/Folder Deletions from the UI!
-    if (dialogType === "delete_file") {
+     if (dialogType === "delete_file") {
       if (answer === "yes") {
         try {
           const res = await fetch("http://localhost:5000/api/files/delete", {
@@ -532,16 +586,13 @@ const startRequest = () => ({
             headers: { "Content-Type": "application/json", "X-User-Id": user?.login },
             body: JSON.stringify({ path: dialogData.path })
           });
-          
           if (res.ok) {
             fetchFiles(currentPath); // Refresh the folder tree
-            
             // If the deleted file is currently open in the editor, close the tab!
             setOpenFiles(prev => prev.filter(f => f.path !== dialogData.path));
             if (activeFilePath === dialogData.path) setActiveFilePath(null);
-            
-            setActivityStream(prev => [{ 
-              id: Date.now(), action: "delete_file", message: `Deleted ${dialogData.path.split('/').pop()}`, timestamp: new Date() 
+            setActivityStream(prev => [{
+              id: Date.now(), action: "delete_file", message: `Deleted ${dialogData.path.split('/').pop()}`, timestamp: new Date()
             }, ...prev]);
           } else {
             console.error("Failed to delete file/folder on server.");
@@ -549,8 +600,37 @@ const startRequest = () => ({
         } catch (err) { console.error("Delete request failed:", err); }
       }
       return; // Stop here! Do not send this to the AI Orchestrator.
-    }
 
+    }
+    // 🟢 2. NEW: Intercept Merge PR
+if (dialogType === "merge_pr") {
+    if (answer === "yes") {
+        try {
+            const repoName = activeRepository; 
+
+            // 📡 Call the Orchestrator Bridge (:4000)
+            const res = await fetch("http://localhost:4000/ask/merge-pr", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include", 
+                body: JSON.stringify({ 
+                    repoName: repoName, 
+                    pullNumber: dialogData.prNumber 
+                })
+            });
+
+            if (res.ok) {
+                toast.success(`PR #${dialogData.prNumber} merged successfully!`);
+            } else {
+                const errData = await res.json();
+                toast.error(`Merge failed: ${errData.error}`);
+            }
+        } catch (err) { 
+            console.error("Merge request failed:", err); 
+        }
+    }
+    return; // Exit early
+}
     // 🤖 3. EXISTING LOGIC: Handle AI Orchestrator Confirmations (like delete_repo)
     // Visually add your choice to the chat
     setMessages(prev => [...prev, {
@@ -1770,34 +1850,46 @@ const handleManualPull = async (repoName) => {
 {/* Global Hidden Utilities */}
 {/* 🛑 Destructive Action Confirmation Modal */}
       {confirmDialog.isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-gray-800 border border-gray-700 rounded-2xl p-6 max-w-md w-full shadow-2xl animate-in fade-in zoom-in duration-200">
-            <div className="flex items-center space-x-3 mb-4 text-red-400">
-              <span className="text-2xl">⚠️</span>
-              <h3 className="text-lg font-bold">Authorization Required</h3>
-            </div>
-            <div className="text-gray-300 text-sm mb-6 leading-relaxed">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {confirmDialog.text.replace('⚠️ **HUMAN-IN-THE-LOOP AUTHORIZATION REQUIRED:**\n\n', '')}
-              </ReactMarkdown>
-            </div>
-            <div className="flex space-x-3 justify-end">
-              <button 
-                onClick={() => handleDialogResponse("no")}
-                className="px-4 py-2 rounded-lg text-sm font-semibold bg-gray-700 hover:bg-gray-600 text-white transition-colors"
-              >
-                Cancel
-              </button>
-              <button 
-                onClick={() => handleDialogResponse("yes")}
-                className="px-4 py-2 rounded-lg text-sm font-semibold bg-red-600 hover:bg-red-700 text-white transition-colors shadow-lg shadow-red-500/30"
-              >
-                Yes, Delete it
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div className="bg-gray-800 border border-gray-700 rounded-2xl p-6 max-w-md w-full shadow-2xl animate-in fade-in zoom-in duration-200">
+      
+      {/* 🎨 Dynamic Header Color & Icon */}
+      <div className={`flex items-center space-x-3 mb-4 ${confirmDialog.type === 'merge_pr' ? 'text-purple-400' : 'text-red-400'}`}>
+        <span className="text-2xl">{confirmDialog.type === 'merge_pr' ? '🚀' : '⚠️'}</span>
+        <h3 className="text-lg font-bold">
+          {confirmDialog.type === 'merge_pr' ? 'Merge Confirmation' : 'Authorization Required'}
+        </h3>
+      </div>
+
+      <div className="text-gray-300 text-sm mb-6 leading-relaxed">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          {confirmDialog.text.replace('⚠️ **HUMAN-IN-THE-LOOP AUTHORIZATION REQUIRED:**\n\n', '')}
+        </ReactMarkdown>
+      </div>
+
+      <div className="flex space-x-3 justify-end">
+        <button 
+          onClick={() => handleDialogResponse("no")}
+          className="px-4 py-2 rounded-lg text-sm font-semibold bg-gray-700 hover:bg-gray-600 text-white transition-colors"
+        >
+          Cancel
+        </button>
+
+        {/* 🎨 Dynamic Button Color & Text */}
+        <button 
+          onClick={() => handleDialogResponse("yes")}
+          className={`px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors shadow-lg ${
+            confirmDialog.type === 'merge_pr' 
+            ? 'bg-purple-600 hover:bg-purple-700 shadow-purple-500/30' 
+            : 'bg-red-600 hover:bg-red-700 shadow-red-500/30'
+          }`}
+        >
+          {confirmDialog.type === 'merge_pr' ? 'Confirm Merge' : 'Yes, Delete it'}
+        </button>
+      </div>
+    </div>
+  </div>
+)}
       <input
   type="file"
   ref={fileInputRef}
@@ -2002,6 +2094,7 @@ const handleManualPull = async (repoName) => {
           </div>
         </div>
       )}
+      <Toaster />
     </div>
   );
 };

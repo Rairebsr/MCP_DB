@@ -8,7 +8,7 @@ import { fileCapabilities } from "../capabilities/fileCapabilities.js";
 import { generateResponse } from "../services/geminiService.js";
 
 // External Backend Imports (Going up 3 levels: routes -> src -> orchestrator -> ROOT -> backend)
-import { listRepos } from "../../../backend/services/github.service.js";
+import { listRepos,createAndSwitchBranch } from "../../../backend/services/github.service.js";
 import { cloneRepo, ensureGitIdentity, smartPush, switchBranch, getStagedDiff, getMergeContext } from "../../../backend/services/git.service.js";
 import Repo from "../../../backend/models/Repo.js";
 import PendingAction from "../../../backend/models/PendingAction.js"; 
@@ -747,24 +747,39 @@ router.post("/", async (req, res) => {
 // 1. CREATE PR
 if (resolvedAction === "create_pull_request") {
     const { title, head, base, body, name } = parameters;
-    let repoName = name || req.body.activeRepoName; // ✅ Use req.body context
+    const workspace = await Workspace.findOne({ userId: req.userId });
+    
+    // 🕵️‍♂️ THE CRITICAL RECOVERY
+    let repoName = name || req.body.activeRepoName;
 
-    if (!head) {
-        return res.json({ success: false, aiResponse: "I need to know the 'head' branch to create a PR." });
+    if (!repoName && workspace?.activeRepoId) {
+        const activeRepo = await Repo.findById(workspace.activeRepoId);
+        if (activeRepo) {
+            // Use the name from DB to fill that empty slot in the URL
+            repoName = activeRepo.name || activeRepo.localPath.split(/[\\/]/).pop();
+        }
     }
+
+    if (!repoName) {
+        return res.json({ success: false, aiResponse: "I don't know which repository to use for the PR. Please click it in the sidebar." });
+    }
+
+    const cleanRepoName = repoName.replace(/\s\(repo\)$/i, "");
+    console.log(`🚀 Attempting PR for: ${cleanRepoName} on branch: ${head}`);
 
     const response = await fetch("http://localhost:5000/api/actions/create-pr", {
         method: "POST",
         headers: backendHeaders,
         body: JSON.stringify({
-            repoName: repoName?.replace(/\s\(repo\)$/i, ""),
+            repoName: cleanRepoName,
             title: title || `Update: ${new Date().toLocaleDateString()}`,
             head,
             base: base || "main",
-            body
+            body: body || "PR generated via DevMind"
         })
     });
     const result = await response.json();
+    
     return res.json({ 
         success: response.ok, 
         aiResponse: await generateResponse({ mode: "action", action: "create_pull_request", toolResult: result }) 
@@ -774,21 +789,40 @@ if (resolvedAction === "create_pull_request") {
 // 2. LIST PRS
 if (resolvedAction === "list_pull_requests") {
     const { name, state } = parameters;
-    let repoName = name || req.body.activeRepoName; // ✅ Use req.body context
+    const workspace = await Workspace.findOne({ userId: req.userId });
+    
+    // 🕵️‍♂️ THE CRITICAL RECOVERY
+    let repoName = name || req.body.activeRepoName;
+
+    if (!repoName && workspace?.activeRepoId) {
+        const activeRepo = await Repo.findById(workspace.activeRepoId);
+        if (activeRepo) {
+            // Use the name from DB to fill that empty slot in the URL
+            repoName = activeRepo.name || activeRepo.localPath.split(/[\\/]/).pop();
+        }
+    }
+
+    if (!repoName) {
+        return res.json({ success: false, aiResponse: "I don't know which repository to use for the PR. Please click it in the sidebar." });
+    }
 
     const response = await fetch("http://localhost:5000/api/actions/list-prs", {
         method: "POST",
         headers: backendHeaders,
         body: JSON.stringify({
-            repoName: repoName?.replace(/\s\(repo\)$/i, ""),
+            repoName: repoName.replace(/\s\(repo\)$/i, ""),
             state: state || "open"
         })
     });
     const result = await response.json();
+    // 🛡️ ONLY return data if result is actually an array
+    const isSuccess = Array.isArray(result);
     return res.json({ 
-        success: true, 
-        data: { type: "pull_requests", prs: result }, 
-        aiResponse: `I found ${result.length} open pull requests in ${repoName}.` 
+        success: isSuccess,
+        data: { type: "pull_requests", prs: isSuccess ? result : [] },
+        aiResponse: isSuccess 
+            ? `I found ${result.length} pull requests.` 
+            : `I couldn't find that repository on GitHub.`
     });
 }
 
@@ -835,13 +869,33 @@ if (resolvedAction === "delete_branch") {
 }
 // 📦 LIST BRANCHES
 if (resolvedAction === "list_branches") {
-    // 🔍 Match the pull/push logic: AI param OR Frontend Active Repo
-    let repoName = parameters.name || req.body.activeRepoName; 
+    // 1. Try to get name from AI parameters or the direct body
+    let repoName = parameters.name || req.body.activeRepoName;
 
+    // 🕵️‍♂️ 2. THE SYNC FIX: If name is missing, look up the Active Repo in the DB
     if (!repoName) {
-        return res.json({ success: false, aiResponse: "I'm not sure which repo to check. Please select one first." });
+        console.log("🔍 No repo name provided. Syncing with Active Workspace...");
+        const workspace = await Workspace.findOne({ userId: req.userId });
+        
+        if (workspace && workspace.activeRepoId) {
+            const activeRepo = await Repo.findById(workspace.activeRepoId);
+            if (activeRepo) {
+                // Use the stored name or the folder name from the path
+                repoName = activeRepo.name || activeRepo.localPath.split(/[\\/]/).pop();
+                console.log(`✅ Synced with Active Repo: ${repoName}`);
+            }
+        }
     }
 
+    // 3. Final safety check
+    if (!repoName) {
+        return res.json({ 
+            success: false, 
+            aiResponse: "I'm not sure which repository to check. Please select one in the sidebar or tell me the name." 
+        });
+    }
+
+    // 4. Proceed to fetch from backend
     const response = await fetch("http://localhost:5000/api/actions/list-branches", {
         method: "POST",
         headers: backendHeaders,
@@ -884,6 +938,63 @@ if (resolvedAction === "list_commits") {
     });
 }
 
+
+// 🌿 CREATE BRANCH
+if (resolvedAction === "create_branch") {
+    const { branch_name, name } = parameters;
+    const workspace = await Workspace.findOne({ userId: req.userId });
+    
+    let workspacePath = null;
+    let repoDoc = null;
+
+    // 🕵️‍♂️ THE RECOVERY LOGIC
+    let searchName = name || req.body.activeRepoName;
+
+    if (workspace) {
+        // If we still don't have a name, use the ID saved in the workspace
+        if (!searchName && workspace.activeRepoId) {
+            repoDoc = await Repo.findById(workspace.activeRepoId);
+            if (repoDoc) {
+                workspacePath = repoDoc.localPath;
+                console.log(`✅ Recovered repo path from activeRepoId: ${workspacePath}`);
+            }
+        } else if (searchName) {
+            // Standard search by name
+            const normalize = (str) => str ? str.toLowerCase().replace(/[-_\s]/g, "") : "";
+            const normalizedSearch = normalize(searchName);
+            const allRepos = await Repo.find({ workspaceId: workspace._id });
+            repoDoc = allRepos.find(r => normalize(r.localPath).includes(normalizedSearch));
+            if (repoDoc) workspacePath = repoDoc.localPath;
+        }
+    }
+
+    if (!workspacePath) {
+        return res.json({ success: false, aiResponse: "I couldn't identify the active repository. Please click it in the sidebar." });
+    }
+
+    // Call the service with the workspace ID to avoid that CastError
+    const result = await createAndSwitchBranch(workspacePath, branch_name, workspace._id);
+    if (result.success) {
+        // 3. Update DB with confirmed branch from Git
+        if (repoDoc) {
+            await Repo.findByIdAndUpdate(repoDoc._id, { 
+                branch: result.currentBranch, 
+                updatedAt: new Date() 
+            });
+        }
+
+        // 4. Return the data to refresh the Frontend UI
+        return res.json({ 
+            success: true, 
+            aiResponse: `I've created and switched to the **${branch_name}** branch.`,
+            data: {
+                branch: result.currentBranch,
+                files: result.files 
+            }
+        });
+    }
+}
+
     // Default Fallback
     return res.status(400).json({ success: false, error: "Action not implemented" });
 
@@ -896,6 +1007,32 @@ if (resolvedAction === "list_commits") {
   }
 });
 
+// Remove the "/api" prefix here because it's already added in index.js
+router.post("/merge-pr", async (req, res) => { 
+    console.log("🚀 Bridge Hit: Merging PR #", req.body.pullNumber);
+    try {
+        const { repoName, pullNumber } = req.body;
+        const token = req.cookies.github_token; 
+
+        if (!token) return res.status(401).json({ error: "Token missing" });
+
+        const response = await fetch("http://localhost:5000/api/actions/merge-pr", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "x-github-token": token,
+                "x-user-id": req.userId || req.headers["x-user-id"] // 🔑 FIX: Pass the user ID!
+            },
+            body: JSON.stringify({ repoName, pullNumber })
+        });
+
+        const result = await response.json();
+        return res.status(response.status).json(result);
+    } catch (err) {
+        console.error("Bridge Error:", err);
+        res.status(500).json({ error: "Bridge connection failed" });
+    }
+});
 // ------------------------------------------------------------------
 // 🔟 DIRECT GEMINI CONFLICT RESOLVER
 // ------------------------------------------------------------------
@@ -1026,6 +1163,7 @@ router.post("/generate-commit", async (req, res) => {
     res.json({ success: true, message: "" });
   }
 });
+
 
 // ------------------------------------------------------------------
 // 1️⃣2️⃣ GET REPOSITORY BRANCHES

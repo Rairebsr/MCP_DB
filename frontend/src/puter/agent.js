@@ -217,6 +217,18 @@ get_pull_request_diff:
 
 PR CONTEXT RULE:
 If the user says "merge it" or "show the diff" and the last assistant message contained a list of PRs or a specific PR number, you MUST extract that pull_number.
+
+──────────────── CREATE_BRANCH RULES ────────────────
+
+- Patterns: "create branch X", "make a new branch called X", "new branch X"
+- Parameters: 
+    - "branch_name": The name of the new branch (Required).
+    - "name": The repository name (Optional, use SMART CONTEXT).
+    - "checkout": Set to true if user says "and switch to it" or "checkout" (Default: true).
+
+Example: "create branch feature-login in sample"
+→ { "action": "create_branch", "parameters": { "branch_name": "feature-login", "name": "sample", "checkout": true } }
+- ⚠️ ACTIVE REPO RULE: If the user provides a branch action (list, create, delete) but NO repository name, you MUST check the conversation history for the most recently used repository and extract that as "name".
 ──────────────── FILE RULES ────────────────
 
 list_files:
