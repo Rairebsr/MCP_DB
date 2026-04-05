@@ -395,6 +395,7 @@ router.post("/", async (req, res) => {
       if (pendingTask) {
         // We are in the confirmation stage! 
         const continuationText = req.body.parameters?._continuation ?? req.body.parameters?.user_input ?? "";
+
         
         if (continuationText.toLowerCase().match(/\b(yes|y|do it|confirm)\b/i)) {
           // ✅ User confirmed! Proceed with deletion.
@@ -749,35 +750,47 @@ if (resolvedAction === "create_pull_request") {
     const { title, head, base, body, name } = parameters;
     const workspace = await Workspace.findOne({ userId: req.userId });
     
-    // 🕵️‍♂️ THE CRITICAL RECOVERY
-    let repoName = name || req.body.activeRepoName;
+    let repoName = name ;
+    let headBranch = head; // 👈 Start with what the AI found
 
-    if (!repoName && workspace?.activeRepoId) {
+    // 🕵️‍♂️ SMART RECOVERY: Repo Name AND Head Branch
+    if (workspace?.activeRepoId) {
         const activeRepo = await Repo.findById(workspace.activeRepoId);
         if (activeRepo) {
-            // Use the name from DB to fill that empty slot in the URL
+            // We force the real repo name (e.g., "sample") from the path or name field
             repoName = activeRepo.name || activeRepo.localPath.split(/[\\/]/).pop();
+            // We force the current branch if the AI didn't catch it
+            headBranch = headBranch || activeRepo.branch;
+            
+            console.log(`🔍 DB Recovery: Using Repo '${repoName}' and Branch '${headBranch}'`);
         }
+    }
+    // Final safety check: if we still don't have a branch, we can't make a PR
+    if (!headBranch) {
+        return res.json({ 
+            success: false, 
+            aiResponse: "I don't know which branch you want to merge. Please switch to a branch or tell me its name." 
+        });
     }
 
     if (!repoName) {
-        return res.json({ success: false, aiResponse: "I don't know which repository to use for the PR. Please click it in the sidebar." });
+        return res.json({ success: false, aiResponse: "I don't know which repository to use. Please select one in the sidebar." });
     }
 
     const cleanRepoName = repoName.replace(/\s\(repo\)$/i, "");
-    console.log(`🚀 Attempting PR for: ${cleanRepoName} on branch: ${head}`);
-
+    
     const response = await fetch("http://localhost:5000/api/actions/create-pr", {
         method: "POST",
         headers: backendHeaders,
         body: JSON.stringify({
             repoName: cleanRepoName,
             title: title || `Update: ${new Date().toLocaleDateString()}`,
-            head,
+            head: headBranch, // 👈 Now guaranteed to be a string
             base: base || "main",
             body: body || "PR generated via DevMind"
         })
     });
+
     const result = await response.json();
     
     return res.json({ 
@@ -827,45 +840,189 @@ if (resolvedAction === "list_pull_requests") {
 }
 
 // 3. MERGE PR
+// ------------------------------------------------------------------
+// 1️⃣3️⃣ MERGE PULL REQUEST
+// ------------------------------------------------------------------
 if (resolvedAction === "merge_pull_request") {
-    const { pull_number, name } = parameters;
-    let repoName = name || req.body.activeRepoName; // ✅ Use req.body context
+    const { pull_number, name, commit_message } = parameters;
+    const workspace = await Workspace.findOne({ userId: req.userId });
+    
+    // 🕵️‍♂️ Context Recovery
+    let repoName = name || req.body.activeRepoName;
 
+    if (!repoName && workspace?.activeRepoId) {
+        const activeRepo = await Repo.findById(workspace.activeRepoId);
+        if (activeRepo) {
+            repoName = activeRepo.name || activeRepo.localPath.split(/[\\/]/).pop();
+        }
+    }
+
+    if (!repoName || !pull_number) {
+        return res.json({ success: false, aiResponse: "I need both the repository name and the PR number to perform a merge." });
+    }
+
+    // Hit the Bridge to Port 5000
     const response = await fetch("http://localhost:5000/api/actions/merge-pr", {
         method: "POST",
         headers: backendHeaders,
         body: JSON.stringify({ 
-            repoName: repoName?.replace(/\s\(repo\)$/i, ""), 
-            pullNumber: pull_number 
+            repoName: repoName.replace(/\s\(repo\)$/i, ""), 
+            pullNumber: pull_number,
+            commitMessage: commit_message 
         })
     });
+
     const result = await response.json();
+
+    // 🎯 Catch the Merge Conflict status from GitHub
+    if (result.error === "MERGE_CONFLICT") {
+        return res.json({
+            success: false,
+            error: "MERGE_CONFLICT",
+            aiResponse: `⚠️ I cannot merge PR #${pull_number} automatically due to conflicts. You'll need to resolve them locally or via the GitHub UI first.`
+        });
+    }
+
     return res.json({ 
         success: response.ok, 
-        aiResponse: await generateResponse({ mode: "action", action: "merge_pull_request", toolResult: result }) 
+        aiResponse: await generateResponse({ 
+            mode: "action", 
+            action: "merge_pull_request", 
+            toolResult: { status: response.ok ? "Merged" : "Failed", pr: pull_number, repo: repoName } 
+        }) 
+    });
+}
+
+// ------------------------------------------------------------------
+// 1️⃣4️⃣ CLOSE PULL REQUEST (With Rejection Comment)
+// ------------------------------------------------------------------
+if (resolvedAction === "close_pull_request") {
+    const { name, pull_number, reason } = parameters;
+    const workspace = await Workspace.findOne({ userId: req.userId });
+
+    // 🕵️‍♂️ Check if this is a "Yes" confirmation
+    if (parameters._continuation?.toLowerCase() === "yes") {
+        const pendingTask = await PendingAction.findOne({ 
+            workspaceId: workspace._id, 
+            type: "close_pr", 
+            stage: "awaiting_confirmation" 
+        });
+
+        if (pendingTask) {
+            // EXECUTE the actual tool call using saved data
+            const response = await fetch("http://localhost:5000/api/actions/close-pr", {
+                method: "POST",
+                headers: backendHeaders,
+                body: JSON.stringify({
+                    repoName: pendingTask.data.repoName,
+                    pullNumber: pendingTask.data.pullNumber,
+                    comment: pendingTask.data.reason
+                })
+            });
+            await PendingAction.deleteOne({ _id: pendingTask._id });
+            const result = await response.json();
+            return res.json({ success: true, aiResponse: `PR #${pendingTask.data.pullNumber} has been closed.` });
+        }
+    }
+
+    // 💾 FIRST HIT: Create the bookmark in DB
+    if (workspace && pull_number) {
+        await PendingAction.create({
+            workspaceId: workspace._id,
+            type: "close_pr",
+            stage: "awaiting_confirmation",
+            data: { repoName: name || req.body.activeRepoName, pullNumber: pull_number, reason }
+        });
+    }
+
+    return res.json({ 
+        success: false, 
+        needsInput: true, 
+        pendingAction: "close_pull_request", 
+        aiResponse: `⚠️ **CONFIRMATION:** Are you sure you want to reject PR #${pull_number}? (yes/no)` 
     });
 }
 
 // 4. DELETE BRANCH
 if (resolvedAction === "delete_branch") {
-    const { branch, name } = parameters;
-    let repoName = name || req.body.activeRepoName; // ✅ Use req.body context
+  const workspace = await Workspace.findOne({ userId: req.userId });
+  
+  // 1. Check for the confirmation record
+  const pendingTask = workspace ? await PendingAction.findOne({ 
+    workspaceId: workspace._id, 
+    type: "delete_branch" 
+  }) : null;
 
-    if (!branch) return res.json({ success: false, aiResponse: "Which branch should I delete?" });
+  if (pendingTask) {
+    // Look for "yes" in the continuation parameter
+    const continuationText = req.body.parameters?._continuation || "";
 
-    const response = await fetch("http://localhost:5000/api/actions/delete-branch", {
-        method: "POST",
-        headers: backendHeaders,
-        body: JSON.stringify({ 
-            name: repoName?.replace(/\s\(repo\)$/i, ""), 
-            branch 
-        })
+    if (continuationText.toLowerCase().match(/\b(yes|y|do it|confirm)\b/i)) {
+      // ✅ SUCCESS: Pull the saved names from the database data
+      const { repoName, branchName } = pendingTask.data;
+      
+      // Clean up the pending task immediately
+      await PendingAction.deleteOne({ _id: pendingTask._id });
+
+      try {
+        // Now we call the backend with the data we remembered from Step 1
+        const response = await fetch("http://localhost:5000/api/actions/delete-branch", {
+          method: "POST",
+          headers: backendHeaders,
+          body: JSON.stringify({ 
+            name: repoName, 
+            branch: branchName 
+          })
+        });
+
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Failed to delete");
+
+        const aiText = await generateResponse({ 
+          action: "delete_branch", 
+          toolResult: { status: "Deleted successfully", branch: branchName, repo: repoName } 
+        });
+        
+        return res.json({ success: true, aiResponse: aiText });
+
+      } catch (err) {
+        return res.json({ success: false, aiResponse: `Error: ${err.message}` });
+      }
+    } else {
+      // ❌ CANCELLED: User said something other than yes
+      await PendingAction.deleteOne({ _id: pendingTask._id });
+      return res.json({ success: true, aiResponse: "Branch deletion cancelled. 🛡️" });
+    }
+  }
+
+  // 2. Initial Request (First time user says "delete branch X")
+  // Extract parameters from the AI's first attempt
+  let repoName = parameters.name || req.body.activeRepoName;
+  const branchName = parameters.branch;
+
+  if (!branchName) {
+    return res.json({ success: false, aiResponse: "Which branch would you like to delete?" });
+  }
+
+  // Clean the repo name (remove "(repo)" suffix if exists)
+  repoName = repoName?.replace(/\s\(repo\)$/i, "");
+
+  // Save to database so we "remember" it when the user replies "yes"
+  if (workspace) {
+    await PendingAction.create({
+      workspaceId: workspace._id,
+      type: "delete_branch",
+      stage: "awaiting_confirmation",
+      data: { repoName, branchName } // Store both here!
     });
-    const result = await response.json();
-    return res.json({ 
-        success: response.ok, 
-        aiResponse: await generateResponse({ mode: "action", action: "delete_branch", toolResult: result }) 
-    });
+  }
+
+  return res.json({ 
+    success: false, 
+    needsInput: true, 
+    pendingAction: "delete_branch", 
+    aiResponse: `⚠️ **CONFIRMATION:** Are you sure you want to delete branch **\`${branchName}\`** in **\`${repoName}\`**? (yes/no)` 
+  });
 }
 // 📦 LIST BRANCHES
 if (resolvedAction === "list_branches") {

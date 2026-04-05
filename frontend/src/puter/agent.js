@@ -204,16 +204,47 @@ create_pull_request:
 
 list_pull_requests:
 - Patterns: "list prs", "show pull requests", "view open prs"
-- Parameters: "name" (repo), "state" (open, closed, all)
+- Parameters: { "name": null }, "state" (open, closed, all)
 
 merge_pull_request:
 - Patterns: "merge pr", "accept pull request"
 - Requires: "pull_number", "name"
 - If user says "merge this pr", get "pull_number" from context if available.
 
+close_pull_request:
+  - Patterns: "close pr", "reject pull request", "stop this pr"
+  - Parameters: 
+    - "name": Repository name.
+    - "pull_number": The PR number.
+    - "reason": The comment for rejection.
+
 get_pull_request_diff:
 - Patterns: "show diff for pr", "what changed in pr", "review pr"
 - Requires: "pull_number", "name"
+──────────────── CREATE_PULL_REQUEST RULES ────────────────
+
+- Patterns: "create pr", "open pull request", "new pr", "open pr headed..."
+- Parameters:
+    - "name": The repository name (REQUIRED. Use SMART CONTEXT if not mentioned).
+    - "title": The title of the PR (e.g., "new changes made in 1.txt").
+    - "head": The source branch (The branch with your changes). 
+    - "base": The target branch (Defaults to "main").
+    - "body": Description (Optional).
+
+- SMART CONTEXT: 
+    1. If "name" is missing, use the most recently active repository from history.
+    2. If "head" is missing, use the most recently switched-to or pushed-to branch.
+
+Example: "open pr headed 'updates'" 
+→ { 
+    "action": "create_pull_request", 
+    "parameters": { 
+        "name": "sample", 
+        "title": "updates", 
+        "head": "carrot", 
+        "base": "main" 
+    } 
+  }
 
 PR CONTEXT RULE:
 If the user says "merge it" or "show the diff" and the last assistant message contained a list of PRs or a specific PR number, you MUST extract that pull_number.
@@ -252,6 +283,29 @@ write_file or create_file:
 upload_file:
 - File is provided by the system
 - NEVER ask user for base64
+
+──────────────── CONTINUATION RULE (CRITICAL) ────────────────
+
+If the user says "yes", "confirm", "y", or "do it":
+1. Check the immediately preceding ASSISTANT message.
+2. Identify the action the assistant was asking about.
+
+→ If Assistant asked about deleting a branch:
+  Action: "delete_branch", Parameters: { "_continuation": "yes" }
+
+→ If Assistant asked about merging a PR:
+  Action: "merge_pull_request", Parameters: { "_continuation": "yes" }
+
+→ If Assistant asked about closing/rejecting a PR:
+  Action: "close_pull_request", Parameters: { "_continuation": "yes" }
+
+→ If Assistant asked about deleting a repo:
+  Action: "delete_repo", Parameters: { "_continuation": "yes" }
+
+Example:
+Assistant: "Are you sure you want to merge PR #7?"
+User: "yes"
+→ { "action": "merge_pull_request", "parameters": { "_continuation": "yes" } }
 
 ──────────────── STRICT OUTPUT RULE ────────────────
 

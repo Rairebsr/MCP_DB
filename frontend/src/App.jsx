@@ -48,6 +48,7 @@ const App = () => {
   const [newFolderName, setNewFolderName] = useState(""); 
 
   const [agentTask, setAgentTask] = useState("");
+  const [rejectionReason, setRejectionReason] = useState("");
 
   // 🧠 SMART CONTEXT SYNCRONIZATION
   // Automatically determine the active repo based on Editor OR Explorer
@@ -399,45 +400,67 @@ const handleFileUpload = async (file) => {
   const renderMessageContent = (content, type, data) => {
 
     if (type === "pull_requests") {
-      const prsArray = Array.isArray(data?.prs) ? data.prs : [];
-    if (prsArray.length === 0) {
-      return <p className="text-gray-500 italic text-xs">No open pull requests found.</p>;
-    }
-
-    return (
-      <div className="mt-2 space-y-3">
-        <p className="text-purple-400 text-sm font-semibold mb-2">Open Pull Requests</p>
-        {prsArray.map((pr) => (
-          <div key={pr.number} className="bg-gray-800/60 p-3 rounded-lg border border-gray-700 shadow-sm">
-            <div className="flex justify-between items-start mb-2">
-              <div>
-                <span className="text-purple-400 font-bold mr-2">#{pr.number}</span>
-                <span className="text-gray-100 font-medium">{pr.title}</span>
-              </div>
-              <a href={pr.url} target="_blank" rel="noreferrer" className="text-blue-400 text-xs hover:underline">
-                View ↗
-              </a>
-            </div>
-            
-            <div className="flex items-center gap-2 text-[10px] mb-3">
-              <span className="bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded border border-blue-800/50">{pr.head}</span>
-              <span className="text-gray-500">→</span>
-              <span className="bg-gray-700 text-gray-300 px-2 py-0.5 rounded border border-gray-600/50">{pr.base}</span>
-              <span className="text-gray-500 ml-auto">by {pr.user}</span>
-            </div>
-
-            {/* 🔘 The Merge Button */}
-            <button 
-              onClick={() => handleMergePR(pr.number, pr.title)}
-              className="w-full py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold rounded transition-colors"
-            >
-              Merge Pull Request
-            </button>
-          </div>
-        ))}
-      </div>
-    );
+  const prsArray = Array.isArray(data?.prs) ? data.prs : [];
+  if (prsArray.length === 0) {
+    return <p className="text-gray-500 italic text-xs">No pull requests found.</p>;
   }
+
+  return (
+    <div className="mt-2 space-y-3">
+      <p className="text-purple-400 text-sm font-semibold mb-2">Pull Request History</p>
+      {prsArray.map((pr) => (
+        <div key={pr.number} className="bg-gray-800/60 p-3 rounded-lg border border-gray-700 shadow-sm">
+          <div className="flex justify-between items-start mb-2">
+            <div>
+              <span className="text-purple-400 font-bold mr-2">#{pr.number}</span>
+              <span className="text-gray-100 font-medium">{pr.title}</span>
+            </div>
+            {/* 🟢 Status Badge */}
+            <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${
+              pr.state === 'open' ? 'bg-green-900/30 text-green-400' : 'bg-gray-700 text-gray-400'
+            }`}>
+              {pr.state}
+            </span>
+          </div>
+          
+          <div className="flex items-center gap-2 text-[10px] mb-3">
+            <span className="bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded border border-blue-800/50">{pr.head}</span>
+            <span className="text-gray-500">→</span>
+            <span className="bg-gray-700 text-gray-300 px-2 py-0.5 rounded border border-gray-600/50">{pr.base}</span>
+          </div>
+
+          {/* 🔘 ACTION Group: Only show if PR is OPEN */}
+          {pr.state === 'open' ? (
+            <div className="flex gap-2">
+              <button 
+                onClick={() => handleMergePR(pr.number, pr.title)}
+                className="flex-1 py-1.5 bg-green-600 hover:bg-green-500 text-white text-[10px] font-bold rounded transition-colors"
+              >
+                Confirm Merge
+              </button>
+              <button 
+                onClick={() => handleClosePR(pr.number, pr.title)}
+                className="flex-1 py-1.5 bg-red-900/40 hover:bg-red-800/60 text-red-400 text-[10px] font-bold rounded border border-red-800/50 transition-colors"
+              >
+                Close / Reject
+              </button>
+            </div>
+          ) : (
+            /* 🔒 View Only link for Closed/Merged PRs */
+            <a 
+              href={pr.url} 
+              target="_blank" 
+              rel="noreferrer" 
+              className="block w-full py-1.5 bg-purple-400 text-center text-grey-800 text-[10px] font-bold rounded border border-gray-700 hover:text-white transition-colors"
+            >
+              View Archived Thread on GitHub ↗
+            </a>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
     // ✅ NEW Case: Commits (Git History)
   if (type === "commits") {
     // Determine if commits are in data.commits or just data
@@ -489,29 +512,44 @@ const handleFileUpload = async (file) => {
       </div>
     );
   }
+  
   // ✅ Case 0: Repo list (structured data)
-  if (type === "repos" && Array.isArray(content)) {
-    return (
-      <ul className="space-y-2">
-        {content.map(repo => (
-          <li
-            key={repo.name}
-            className="flex items-center gap-2"
-          >
+if (type === "github_repos") {
+  // Use data.repos if available, otherwise fallback to content
+  const reposArray = data?.repos || (Array.isArray(content) ? content : []);
+
+  if (reposArray.length === 0) {
+    return <p className="text-gray-500 italic text-xs">No repositories found.</p>;
+  }
+
+  return (
+    <div className="mt-2 space-y-2">
+      <p className="text-blue-400 text-sm font-semibold mb-2">Your GitHub Repositories</p>
+      <div className="grid grid-cols-1 gap-2">
+        {reposArray.map(repo => (
+          <div key={repo.name} className="bg-gray-800/60 p-3 rounded-lg border border-gray-700 flex items-center justify-between group hover:border-blue-500/50 transition-colors">
+            <div className="flex flex-col">
+              <div className="flex items-center gap-2">
+                <span className="text-gray-100 font-medium">{repo.name}</span>
+                {repo.private && <span title="Private" className="text-[10px]">🔒</span>}
+              </div>
+              <span className="text-[10px] text-gray-500">{repo.default_branch}</span>
+            </div>
+            
             <a
               href={repo.url}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-blue-400 hover:underline"
+              className="px-3 py-1 bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 text-xs rounded border border-blue-500/30 transition-all"
             >
-              {repo.name}
+              View Repository ↗
             </a>
-            {repo.private && <span title="Private">🔒</span>}
-          </li>
+          </div>
         ))}
-      </ul>
-    );
-  }
+      </div>
+    </div>
+  );
+}
 
   // Case 1: Plain string
   if (typeof content === "string") {
@@ -567,6 +605,45 @@ const handleMergePR = async (prNumber, prTitle) => {
     type: "merge_pr",
     data: { prNumber }
   });
+};
+
+const handleClosePR = async (prNumber, prTitle) => {
+  setIsProcessing(true);
+  setAgentTask("Initializing PR rejection state...");
+
+  try {
+    // 1. Tell the Orchestrator to create the PendingAction in MongoDB
+    const res = await fetch("http://localhost:4000/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        action: "close_pull_request",
+        parameters: { 
+          pull_number: prNumber,
+          name: activeRepository 
+        }
+      })
+    });
+
+    const data = await res.json();
+
+    // 2. Now that the DB record is created, show the modal
+    if (data.needsInput) {
+      setPendingAction(data.pendingAction); // "close_pull_request"
+      setConfirmDialog({
+        isOpen: true,
+        text: data.aiResponse, // Use the AI's warning message from backend
+        type: "close_pull_request",
+        requiresInput: true,
+        data: { prNumber }
+      });
+    }
+  } catch (err) {
+    console.error("Failed to initialize PR close:", err);
+  } finally {
+    setIsProcessing(false);
+  }
 };
 
   // 🔘 Handles clicks from the Confirmation Modal
@@ -665,8 +742,9 @@ if (dialogType === "merge_pr") {
       setPendingAction(null);
       setMessages(prev => [...prev, {
         id: Date.now(), 
-        type: data.success ? "assistant" : "error", 
-        content: data.aiResponse || data.error, 
+        content: data.aiResponse || data.error,
+        type: data.data?.type || (data.success ? "assistant" : "error"),
+        data: data.data,
         timestamp: new Date()
       }]);
     } catch (err) {
@@ -750,9 +828,10 @@ if (dialogType === "merge_pr") {
         }));
 
       const routerResponse = await askPuter(currentInput, chatHistory, "router");
+      let cleanedResponse = routerResponse.replace(/```json/g, "").replace(/```/g, "").trim();
 
       try {
-        payload = JSON.parse(routerResponse);
+        payload = JSON.parse(cleanedResponse);
       } catch {
         // fallback: router responded with text
         setMessages(prev => [...prev, {
@@ -807,13 +886,25 @@ if (dialogType === "merge_pr") {
     }
     
     // 🎯 Auto-Inject Active Repository for Git operations
-   if (payload.action === "push_repo" || payload.action === "clone_repo" || payload.action === "switch_branch") {
-      payload.parameters = payload.parameters || {};
-      // ✅ NEW LOGIC
-      if (!payload.parameters.name && activeRepository) {
-         payload.parameters.name = activeRepository;
-      }
-    }
+   // 🎯 Auto-Inject Active Repository for Git & PR operations
+const gitActions = [
+  "push_repo", 
+  "clone_repo", 
+  "switch_branch", 
+  "create_branch", 
+  "list_branches", 
+  "create_pull_request", 
+  "list_pull_requests",
+  "merge_pull_request", // 👈 Added
+  "close_pull_request"  // 👈 Added
+];
+
+if (gitActions.includes(payload.action)) {
+  payload.parameters = payload.parameters || {};
+  if (!payload.parameters.name && activeRepository) {
+    payload.parameters.name = activeRepository;
+  }
+}
 
     // Inside handleSubmit, add this alongside your 'push' interceptor:
     if (lowerInput === "pull" || lowerInput === "sync" || lowerInput.startsWith("git pull")) {
@@ -824,6 +915,7 @@ if (dialogType === "merge_pr") {
 
     // 🚀 SEND TO ORCHESTRATOR
     setAgentTask(`Executing ${payload.action} sequence in Orchestrator...`);
+    console.log("🚀 ORCHESTRATOR PAYLOAD:", payload); // If this doesn't show up in console, the logic exited early.
     const backendRes = await fetch("http://localhost:4000/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -859,19 +951,30 @@ if (dialogType === "merge_pr") {
     if (data.data?.type === "github_repos") {
       setMessages(prev => [...prev, {
         id: Date.now(),
-        type: "repos",
+        type: "github_repos",
         content: data.data.repos,
-        timestamp: new Date()
+        timestamp: new Date(),
+        data: data.data
       }]);
+      setMetrics(prev => [...prev, finishRequest(req, true)]);
+      setIsProcessing(false);
+      return;
     }
 
     // 4. Handle Pending Action / Clarification
     if (data.needsInput && data.pendingAction) {
       setPendingAction(data.pendingAction);
+
+      const dangerousActions = ["delete_repo", "delete_branch", "close_pull_request", "merge_pull_request"];
       
       // Trigger the modal if it's a dangerous action!
-      if (data.aiResponse.includes("HUMAN-IN-THE-LOOP") || data.pendingAction === "delete_repo") {
-         setConfirmDialog({ isOpen: true, text: data.aiResponse, type: "ai_action" });
+      if (data.aiResponse.includes("HUMAN-IN-THE-LOOP") || dangerousActions.includes(data.pendingAction)) {
+         setConfirmDialog({ 
+          isOpen: true, 
+        text: data.aiResponse, 
+        type: data.pendingAction, // 👈 Dynamically sets type to "close_pull_request" or "merge_pr"
+        data: data.params // Pass PR number/repo name to the modal
+        });
       }
 
       setMessages(prev => [...prev, {
@@ -1015,28 +1118,44 @@ if (dialogType === "merge_pr") {
 
 // Performance metrics data
   const performanceData = React.useMemo(() => {
-    if (!metrics.length) {
-      return {
-        responseTimes: [],
-        successRate: 0,
-        activeConnections: 1 // Hardcoded since we removed server tracking
-      };
-    }
-
-    const responseTimes = metrics.map(m =>
-      Math.round(m.endTime - m.startTime)
-    );
-
-    const successRate = (
-      (metrics.filter(m => m.success).length / metrics.length) * 100
-    ).toFixed(1);
-
+  if (!metrics.length) {
     return {
-      responseTimes,
-      successRate,
-      activeConnections: 1
+      avgLatency: 0,
+      peakLatency: 0,
+      successRate: 0,
+      gitLatency: 0,
+      aiLatency: 0,
+      totalRequests: 0
     };
-  }, [metrics]);
+  }
+
+  // 1. Calculate individual durations
+  const durations = metrics.map(m => Math.round(m.endTime - m.startTime));
+  
+  // 2. Segmented Latency (Assuming your metric object has an 'action' field)
+  const gitMetrics = metrics.filter(m => ['push_repo', 'pull_repo', 'clone_repo'].includes(m.action));
+  const aiMetrics = metrics.filter(m => !['push_repo', 'pull_repo', 'clone_repo'].includes(m.action));
+
+  const getAvg = (arr) => arr.length 
+    ? Math.round(arr.reduce((a, b) => a + (b.endTime - b.startTime), 0) / arr.length) 
+    : 0;
+
+  const successCount = metrics.filter(m => m.success).length;
+
+  return {
+    // Overall Stats
+    avgLatency: Math.round(durations.reduce((a, b) => a + b, 0) / durations.length),
+    peakLatency: Math.max(...durations),
+    successRate: ((successCount / metrics.length) * 100).toFixed(1),
+    
+    // Segmented Stats (Great for the Result Chapter!)
+    gitLatency: getAvg(gitMetrics),
+    aiLatency: getAvg(aiMetrics),
+    
+    totalRequests: metrics.length,
+    lastStatus: metrics[metrics.length - 1].success ? 'Stable' : 'Degraded'
+  };
+}, [metrics]);
 
   const getMessageStyles = (type) => {
     const baseStyles = "rounded-2xl px-4 py-3 max-w-[80%] break-words";
@@ -1298,29 +1417,50 @@ const handleManualPull = async (repoName) => {
                 </div>
 
                 {/* Relocated Mini-Analytics (Pinned to bottom) */}
-                <div className="pt-4 mt-4 border-t border-gray-800 shrink-0 px-2">
-                  <h3 className="font-semibold text-gray-500 text-[10px] uppercase tracking-wider mb-3">System Health</h3>
-                  <div className="grid grid-cols-2 gap-2 mb-3">
-                    <div className="bg-gray-800/50 p-2 rounded border border-gray-700/50 text-center">
-                      <div className="text-sm font-bold text-green-400">{performanceData.successRate}%</div>
-                      <div className="text-gray-500 text-[8px] uppercase tracking-tighter">Success</div>
-                    </div>
-                    <div className="bg-gray-800/50 p-2 rounded border border-gray-700/50 text-center">
-                      <div className="text-sm font-bold text-blue-400">
-                        {performanceData.responseTimes.length ? Math.round(performanceData.responseTimes.reduce((a, b) => a + b, 0) / performanceData.responseTimes.length) : 0}ms
-                      </div>
-                      <div className="text-gray-500 text-[8px] uppercase tracking-tighter">Latency</div>
-                    </div>
-                  </div>
-                  <div className="space-y-1.5">
-                    {['LLM Orchestrator', 'API Gateway'].map((service) => (
-                      <div key={service} className="flex items-center justify-between px-2 py-1 bg-gray-800/30 rounded border border-gray-700/50">
-                        <span className="text-[10px] text-gray-400">{service}</span>
-                        <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                {/* Relocated Mini-Analytics (Pinned to bottom) */}
+<div className="pt-4 mt-4 border-t border-gray-800 shrink-0 px-2">
+  <h3 className="font-semibold text-gray-500 text-[10px] uppercase tracking-wider mb-3">System Health</h3>
+  
+  {/* 🚀 START OF CHANGES */}
+  <div className="grid grid-cols-2 gap-2 mb-3">
+    {/* Reliability with dynamic coloring based on success rate */}
+    <div className="bg-gray-800/50 p-2 rounded border border-gray-700/50 text-center">
+      <div className={`text-sm font-bold ${performanceData.successRate > 90 ? 'text-green-400' : 'text-yellow-400'}`}>
+        {performanceData.successRate}%
+      </div>
+      <div className="text-gray-500 text-[8px] uppercase tracking-tighter">Reliability</div>
+    </div>
+
+    {/* Segmented Average Latency */}
+    <div className="bg-gray-800/50 p-2 rounded border border-gray-700/50 text-center">
+      <div className="text-sm font-bold text-blue-400">
+        {performanceData.avgLatency}ms
+      </div>
+      <div className="text-gray-500 text-[8px] uppercase tracking-tighter">Avg Latency</div>
+    </div>
+  </div>
+
+  {/* New: Dedicated Git Network indicator (appears when Git actions occur) */}
+  {performanceData.gitLatency > 0 && (
+    <div className="mb-3 px-2 py-1 bg-blue-900/10 border border-blue-800/30 rounded">
+      <div className="flex justify-between items-center text-[8px] uppercase">
+        <span className="text-blue-400 font-semibold">Git Network Avg:</span>
+        <span className="text-blue-300">{performanceData.gitLatency}ms</span>
+      </div>
+    </div>
+  )}
+  {/* 🚀 END OF CHANGES */}
+
+  {/* Service Status Indicators */}
+  <div className="space-y-1.5">
+    {['LLM Orchestrator', 'API Gateway'].map((service) => (
+      <div key={service} className="flex items-center justify-between px-2 py-1 bg-gray-800/30 rounded border border-gray-700/50">
+        <span className="text-[10px] text-gray-400">{service}</span>
+        <div className={`w-1.5 h-1.5 rounded-full ${isProcessing ? 'bg-yellow-400 animate-pulse' : 'bg-green-400'}`}></div>
+      </div>
+    ))}
+  </div>
+</div>
               </div>
             )}
 
@@ -1527,7 +1667,7 @@ const handleManualPull = async (repoName) => {
             {messages.map((message) => (
               <div key={message.id} className="flex flex-col mb-2">
                 <div className={getMessageStyles(message.type)}>
-                  {renderMessageContent(message.content,message.data?.type, message.data)}
+                  {renderMessageContent(message.content, message.data?.type || message.type, message.data)}
                 </div>
                 <div className={`text-xs text-gray-500 mt-1 ${message.type === 'user' ? 'text-right mr-2' : 'ml-2'}`}>
                   {message.timestamp.toLocaleTimeString()}
@@ -1866,6 +2006,22 @@ const handleManualPull = async (repoName) => {
           {confirmDialog.text.replace('⚠️ **HUMAN-IN-THE-LOOP AUTHORIZATION REQUIRED:**\n\n', '')}
         </ReactMarkdown>
       </div>
+
+      {confirmDialog.requiresInput && (
+        <div className="mt-4 mb-6 animate-in slide-in-from-top-2 duration-200">
+          <label className="text-[10px] text-gray-500 uppercase font-bold mb-1.5 block tracking-wider">
+            Rejection Reason / Feedback
+          </label>
+          <textarea 
+            autoFocus
+            className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-gray-200 focus:border-red-500 outline-none transition-all placeholder-gray-600 focus:ring-1 focus:ring-red-500/50"
+            placeholder="e.g., Please fix the indentation in helper.js..."
+            rows="3"
+            value={rejectionReason}
+            onChange={(e) => setRejectionReason(e.target.value)}
+          />
+        </div>
+      )}
 
       <div className="flex space-x-3 justify-end">
         <button 

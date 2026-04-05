@@ -437,12 +437,16 @@ router.post("/list-prs", async (req, res, next) => {
 });
 
 // MERGE A PULL REQUEST
+// MERGE A PULL REQUEST (Port 5000)
 router.post("/merge-pr", async (req, res, next) => {
     try {
         const { repoName, pullNumber, commitMessage } = req.body;
         const token = req.headers["x-github-token"];
         
+        if (!token) return res.status(401).json({ error: "GitHub token missing" });
+
         const octokit = getOctokit(token);
+        // 🕵️‍♂️ Dynamic Owner Resolution
         const owner = await githubPRService.getAuthenticatedUser(octokit);
 
         const response = await octokit.rest.pulls.merge({
@@ -450,21 +454,74 @@ router.post("/merge-pr", async (req, res, next) => {
             repo: repoName,
             pull_number: pullNumber,
             commit_title: commitMessage || `Merged PR #${pullNumber} via DevMind`,
-            merge_method: 'squash' // Prefer squash for clean history
+            merge_method: 'squash' 
         });
 
-        res.json({ success: true, message: response.data.message, sha: response.data.sha });
+        res.json({ 
+            success: true, 
+            message: response.data.message, 
+            sha: response.data.sha 
+        });
+
     } catch (err) {
-    if (err.status === 405 || err.status === 409) {
-        // 🚩 This is a conflict!
-        return res.status(409).json({ 
+        console.error("🔥 Merge PR Backend Error:", err.message);
+        
+        // Handle GitHub's specific "Conflict" or "Unmergeable" codes
+        if (err.status === 405 || err.status === 409) {
+            return res.status(409).json({ 
+                success: false, 
+                error: "MERGE_CONFLICT",
+                message: "This PR has conflicts that must be resolved before merging." 
+            });
+        }
+        
+        res.status(err.status || 500).json({ 
             success: false, 
-            error: "MERGE_CONFLICT",
-            message: "Cannot merge automatically. There are conflicts that must be resolved first." 
+            error: err.message 
         });
     }
-    res.status(500).json({ error: err.message });
-}
+});
+
+// CLOSE A PULL REQUEST (Port 5000)
+router.post("/close-pr", async (req, res, next) => {
+    try {
+        const { repoName, pullNumber, comment } = req.body;
+        const token = req.headers["x-github-token"];
+        
+        if (!token) return res.status(401).json({ error: "GitHub token missing" });
+
+        const octokit = getOctokit(token);
+        const owner = await githubPRService.getAuthenticatedUser(octokit);
+
+        // 1. Add the rejection comment
+        await octokit.rest.issues.createComment({
+            owner,
+            repo: repoName,
+            issue_number: pullNumber,
+            body: `🚫 **DevMind Assistant:** ${comment || "Closing pull request."}`
+        });
+
+        // 2. Update PR state to 'closed'
+        const { data: updatedPR } = await octokit.rest.pulls.update({
+            owner,
+            repo: repoName,
+            pull_number: pullNumber,
+            state: 'closed'
+        });
+
+        res.json({ 
+            success: true, 
+            message: `PR #${pullNumber} closed successfully`,
+            data: updatedPR 
+        });
+
+    } catch (err) {
+        console.error("🔥 Close PR Backend Error:", err.message);
+        res.status(err.status || 500).json({ 
+            success: false, 
+            error: err.message 
+        });
+    }
 });
 
 // LIST BRANCHES
@@ -497,24 +554,42 @@ router.post("/list-commits", async (req, res, next) => {
   }
 });
 
-//DELETE BRANCH
 
-router.post("/delete-branch", async (req, res, next) => {
+//DELETE BRANCH
+router.post("/delete-branch", async (req, res) => {
   try {
     const { name, branch } = req.body;
     const repoDoc = await findRepoByName(req.userId, name);
 
-    // Safety Check: Get current branch first
+    // 1. Safety check: Check local status
     const status = await gitExtraService.listBranches(repoDoc.localPath);
     if (status.current === branch) {
-      return res.status(400).json({ 
-        error: `Cannot delete branch '${branch}' because you are currently on it. Switch to another branch first.` 
-      });
+       // Even with confirmation, Git physically cannot delete the active branch.
+       return res.status(400).json({ 
+         error: `Cannot delete '${branch}' because it is active. Switch to 'main' first.` 
+       });
     }
 
-    const result = await gitExtraService.deleteBranch(repoDoc.localPath, branch);
-    res.json({ success: true, branch, result });
-  } catch (err) { 
+    // 2. Local Delete (Forced)
+    const localResult = await gitExtraService.deleteBranch(repoDoc.localPath, branch);
+
+    // 3. Remote Delete (GitHub)
+    let remoteSuccess = false;
+    try {
+      await gitExtraService.pushDelete(repoDoc.localPath, branch);
+      remoteSuccess = true;
+    } catch (remoteErr) {
+      console.warn("Remote delete failed, it might not exist on GitHub:", remoteErr.message);
+    }
+
+    res.json({ 
+      success: true, 
+      local: localResult, 
+      remote: remoteSuccess,
+      message: remoteSuccess ? "Deleted everywhere" : "Deleted locally only" 
+    });
+
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });

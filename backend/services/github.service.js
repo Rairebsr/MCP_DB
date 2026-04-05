@@ -258,13 +258,24 @@ export const gitExtraService = {
   },
 
   // DELETE BRANCH
-  deleteBranch: async (localPath, branchName) => {
-    const { default: simpleGit } = await import("simple-git");
-    const git = simpleGit(localPath);
-    // '-d' is safe delete, '-D' is forced. We'll use '-d' by default.
-    return await git.deleteLocalBranch(branchName);
-  },
+  // In gitExtraService.js
 
+// ... existing code
+deleteBranch: async (localPath, branchName) => {
+  const { default: simpleGit } = await import("simple-git");
+  const git = simpleGit(localPath);
+  
+  // 🟢 CHANGE: Add 'true' as the second argument to force delete (-D)
+  // This bypasses the "not fully merged" check.
+  return await git.deleteLocalBranch(branchName, true);
+},
+
+// 🟢 ADD: A method to handle the remote deletion via CLI if not using Octokit
+pushDelete: async (localPath, branchName) => {
+  const { default: simpleGit } = await import("simple-git");
+  const git = simpleGit(localPath);
+  return await git.push('origin', branchName, { '--delete': null });
+},
   // LIST COMMITS
   listCommits: async (localPath, branch = null, limit = 10) => {
     const { default: simpleGit } = await import("simple-git");
@@ -313,6 +324,8 @@ createBranch: async (localPath, branchName, checkout = true) => {
         throw err;
     }
 }
+
+
 };
 
 // backend/services/git.service.js

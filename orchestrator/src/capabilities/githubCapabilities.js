@@ -110,6 +110,11 @@ switch_branch: {
   create_branch: {
     description: "Create a new branch in a repository and optionally switch to it",
     parameters: ["name", "branch_name", "checkout"]
+  },
+
+  close_pull_request: {
+    description: "Close and comment on a pull request",
+    parameters: ["name", "pull_number", "reason"]
   }
 };
 
