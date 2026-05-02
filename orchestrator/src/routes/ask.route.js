@@ -22,22 +22,28 @@ function normalizeRepoName(name = "") {
 
 router.post("/", async (req, res) => {
   console.log("---- /ask HIT ----");
-  console.log("BODY:", JSON.stringify(req.body, null, 2));
-
-  const { action, tool, parameters = {} } = req.body;
+  
+  const { action, tool } = req.body;
   const resolvedAction = action || tool;
 
-  // Common Parameters extraction
-  const name = req.body.name ?? parameters.name;
-  const description = req.body.description ?? parameters.description;
-  const isPrivate = req.body.private ?? parameters.private;
-  const initialize_with_readme = req.body.initialize_with_readme ?? parameters.initialize_with_readme;
+  // 📥 THE "MASTER PARAMS" MERGE
+  // This combines everything: top-level body + parameters object
+  const incomingParams = req.body.parameters || {};
+  const params = {
+    ...req.body,       // Capture top-level fields (name, description, etc.)
+    ...incomingParams  // Override with AI-extracted parameters
+  };
+
+  // 🕵️‍♂️ SMART MAPPING (Typo-Immunity)
+  // Ensure common aliases all point to the standard keys your blocks expect
+  const name = params.name || params.repository || params.repoName || req.body.activeRepoName;
+  const isPrivate = params.private ?? params.isPrivate ?? false;
+  const description = params.description || "";
+  const initialize_with_readme = params.initialize_with_readme ?? params.add_readme ?? false;
+  const pull_number = params.pull_number || params.pullNumber || params.prNumber;
 
   const token = req.cookies.github_token;
-
-  if (!token) {
-    return res.status(401).json({ success: false, error: "Missing GitHub token" });
-  }
+  if (!token) return res.status(401).json({ success: false, error: "Missing GitHub token" });
 
   // Capability enforcement
   if (!githubCapabilities[resolvedAction] && !fileCapabilities[resolvedAction]) {
@@ -104,8 +110,7 @@ router.post("/", async (req, res) => {
     // 3️⃣ UPDATE REPO
     // ------------------------------------------------------------------
     if (resolvedAction === "update_repo") {
-      const { name, private: isPrivate, add_readme } = req.body.parameters || {};
-
+      const { name, private: isPrivate, add_readme } = params;
       if (!name) {
         const aiText = await generateResponse({ mode: "clarification", action: "update_repo", missing: ["repository name"] });
         return res.json({ success: false, needsInput: true, pendingAction: "update_repo", aiResponse: aiText });
@@ -134,9 +139,8 @@ router.post("/", async (req, res) => {
     // 4️⃣ CLONE REPO (Smart Lookup)
     // ------------------------------------------------------------------
     if (resolvedAction === "clone_repo") {
-      let repoUrl = req.body.repo_url ?? parameters.repo_url ?? parameters.url;
-      let targetName = req.body.local_path ?? parameters.local_path ?? parameters.name ?? parameters.repository;
-
+      let repoUrl = params.repo_url ?? params.url;
+      let targetName = params.local_path ?? params.name ?? params.repository;
       const workspace = await Workspace.findOne({ userId: req.userId });
 
       // Smart Lookup: Name provided but no URL? Find it.
@@ -196,9 +200,8 @@ router.post("/", async (req, res) => {
     // 5️⃣ GIT PUSH (DB OPTIMIZED + TYPO IMMUNE)
     // ------------------------------------------------------------------
     if (resolvedAction === "push_repo") {
-      const message = req.body.message ?? parameters.message ?? "Update from AI";
-      let repoName = req.body.name ?? parameters.name ?? parameters.repository;
-
+      const message = params.message ?? "Update from AI";
+      let repoName = name;
       const ROOT_WORKSPACE = path.resolve(process.cwd(), "..", "mcp_workspace");
       let workspacePath = null;
       let repoDoc = null;
@@ -340,11 +343,11 @@ router.post("/", async (req, res) => {
     // 6️⃣ RENAME REPO
     // ------------------------------------------------------------------
     if (resolvedAction === "rename_repo") {
-      let oldName = req.body.old_name ?? parameters.old_name ?? req.body.parameters?.current_name;
-      let newName = req.body.new_name ?? parameters.new_name;
+      let oldName = params.old_name ?? params.current_name ?? params.name; 
+      let newName = params.new_name;
 
-      // Handle continuation/smart parsing
-      const continuation = (!oldName || !newName) ? (req.body.parameters?._continuation ?? req.body.parameters?.user_input) : null;
+      // ✅ Use params._continuation for a much cleaner look
+      const continuation = (!oldName || !newName) ? params._continuation : null;
       if (continuation) {
         const renameMatch = continuation.match(/(?:change|rename)\s+(\S+)\s+to\s+(\S+)/i);
         if (renameMatch) {
@@ -394,8 +397,7 @@ router.post("/", async (req, res) => {
 
       if (pendingTask) {
         // We are in the confirmation stage! 
-        const continuationText = req.body.parameters?._continuation ?? req.body.parameters?.user_input ?? "";
-
+        const continuationText = params._continuation ?? params.user_input ?? "";
         
         if (continuationText.toLowerCase().match(/\b(yes|y|do it|confirm)\b/i)) {
           // ✅ User confirmed! Proceed with deletion.
@@ -446,7 +448,7 @@ router.post("/", async (req, res) => {
       }
 
       // 2. Initial Request (No pending task found)
-      const repoName = parameters.name;
+      const repoName = name;
       if (!repoName) return res.json({ success: false, needsInput: true, aiResponse: "Which repository would you like to delete?", pendingAction: "delete_repo" });
 
       // Save the intent to the DB to await confirmation
@@ -471,8 +473,9 @@ router.post("/", async (req, res) => {
     // 9️⃣ SWITCH / CREATE BRANCH
     // ------------------------------------------------------------------
     if (resolvedAction === "switch_branch") {
-      const branchName = req.body.parameters?.branch;
-      let repoName = req.body.name ?? parameters.name ?? parameters.repository;
+      const branchName = params.branch; 
+      // ✅ Use the 'name' constant you defined at the top of the route
+      let repoName = name;
 
       if (!branchName) {
         const aiText = await generateResponse({ mode: "clarification", action: "switch_branch", missing: ["branch name"] });
@@ -540,7 +543,7 @@ router.post("/", async (req, res) => {
     
     // List Files
     if (resolvedAction === "list_files") {
-      const path = req.body.path ?? parameters.path ?? ".";
+      const path = params.path ?? ".";
       const response = await fetch("http://localhost:5000/api/files/list", {
         method: "POST",
         headers: backendHeaders,
@@ -553,7 +556,7 @@ router.post("/", async (req, res) => {
 
     // Read File
     if (resolvedAction === "read_file") {
-      const filePath = req.body.path ?? parameters.path;
+      const filePath = params.path;
       if (!filePath) {
         const aiText = await generateResponse({ mode: "clarification", action: "read_file", missing: ["file path"] });
         return res.json({ success: false, needsInput: true, pendingAction: "read_file", aiResponse: aiText });
@@ -578,9 +581,9 @@ router.post("/", async (req, res) => {
     // Write File + Create File (Aliased)
     // Write File + Create File (Aliased)
     if (resolvedAction === "write_file" || resolvedAction === "create_file") {
-      const filePath = req.body.path ?? parameters.path;
-      const content = req.body.content ?? parameters.content ?? ""; // 👈 ALLOW EMPTY CONTENT
-      const incomingHash = req.body.hash ?? parameters.hash;
+      const filePath = params.path;
+      const content = params.content ?? ""; 
+      const incomingHash = params.hash;
 
       // 👈 ONLY FAIL IF THE PATH IS MISSING
       if (!filePath) {
@@ -631,8 +634,8 @@ router.post("/", async (req, res) => {
 
     // Upload File
     if (resolvedAction === "upload_file") {
-      const filename = req.body.filename ?? parameters.filename;
-      const content_base64 = req.body.content_base64 ?? parameters.content_base64;
+      const filename = params.filename;
+      const content_base64 = params.content_base64;
       if (!filename || !content_base64) {
         const aiText = await generateResponse({ mode: "clarification", action: "upload_file", missing: ["filename/content"] });
         return res.json({ success: false, needsInput: true, pendingAction: "upload_file", aiResponse: aiText });
@@ -653,7 +656,7 @@ router.post("/", async (req, res) => {
     // 8️⃣ PULL REPO (AI-INTEGRATED CONFLICT HANDLING)
     // ------------------------------------------------------------------
     if (resolvedAction === "pull_repo") {
-      let repoName = req.body.name ?? parameters.name ?? parameters.repository;
+      let repoName = name;
       const ROOT_WORKSPACE = path.resolve(process.cwd(), "..", "mcp_workspace");
       let workspacePath = null;
       let repoDoc = null;
@@ -747,7 +750,7 @@ router.post("/", async (req, res) => {
     // 1. CREATE PR
 // 1. CREATE PR
 if (resolvedAction === "create_pull_request") {
-    const { title, head, base, body, name } = parameters;
+    const { title, head, base, body, name } = params;
     const workspace = await Workspace.findOne({ userId: req.userId });
     
     let repoName = name ;
@@ -801,7 +804,7 @@ if (resolvedAction === "create_pull_request") {
 
 // 2. LIST PRS
 if (resolvedAction === "list_pull_requests") {
-    const { name, state } = parameters;
+    const { name, state } = params;
     const workspace = await Workspace.findOne({ userId: req.userId });
     
     // 🕵️‍♂️ THE CRITICAL RECOVERY
@@ -844,7 +847,7 @@ if (resolvedAction === "list_pull_requests") {
 // 1️⃣3️⃣ MERGE PULL REQUEST
 // ------------------------------------------------------------------
 if (resolvedAction === "merge_pull_request") {
-    const { pull_number, name, commit_message } = parameters;
+    const { pull_number, name, commit_message } = params;
     const workspace = await Workspace.findOne({ userId: req.userId });
     
     // 🕵️‍♂️ Context Recovery
@@ -897,11 +900,11 @@ if (resolvedAction === "merge_pull_request") {
 // 1️⃣4️⃣ CLOSE PULL REQUEST (With Rejection Comment)
 // ------------------------------------------------------------------
 if (resolvedAction === "close_pull_request") {
-    const { name, pull_number, reason } = parameters;
+    const { name, pull_number, reason } = params;
     const workspace = await Workspace.findOne({ userId: req.userId });
 
     // 🕵️‍♂️ Check if this is a "Yes" confirmation
-    if (parameters._continuation?.toLowerCase() === "yes") {
+    if (params._continuation?.toLowerCase() === "yes") {
         const pendingTask = await PendingAction.findOne({ 
             workspaceId: workspace._id, 
             type: "close_pr", 
@@ -955,7 +958,7 @@ if (resolvedAction === "delete_branch") {
 
   if (pendingTask) {
     // Look for "yes" in the continuation parameter
-    const continuationText = req.body.parameters?._continuation || "";
+    const continuationText = params._continuation ?? params.user_input ?? "";
 
     if (continuationText.toLowerCase().match(/\b(yes|y|do it|confirm)\b/i)) {
       // ✅ SUCCESS: Pull the saved names from the database data
@@ -997,8 +1000,8 @@ if (resolvedAction === "delete_branch") {
 
   // 2. Initial Request (First time user says "delete branch X")
   // Extract parameters from the AI's first attempt
-  let repoName = parameters.name || req.body.activeRepoName;
-  const branchName = parameters.branch;
+  let repoName = name
+  const branchName = params.branch;
 
   if (!branchName) {
     return res.json({ success: false, aiResponse: "Which branch would you like to delete?" });
@@ -1027,7 +1030,7 @@ if (resolvedAction === "delete_branch") {
 // 📦 LIST BRANCHES
 if (resolvedAction === "list_branches") {
     // 1. Try to get name from AI parameters or the direct body
-    let repoName = parameters.name || req.body.activeRepoName;
+    let repoName = name
 
     // 🕵️‍♂️ 2. THE SYNC FIX: If name is missing, look up the Active Repo in the DB
     if (!repoName) {
@@ -1071,7 +1074,7 @@ if (resolvedAction === "list_branches") {
 // 📜 LIST COMMITS
 if (resolvedAction === "list_commits") {
     // 🔍 Match the pull/push logic
-    let repoName = parameters.name || req.body.activeRepoName;
+    let repoName = name
 
     if (!repoName) {
         return res.json({ success: false, aiResponse: "Which repository's history should I show?" });
@@ -1082,7 +1085,7 @@ if (resolvedAction === "list_commits") {
         headers: backendHeaders,
         body: JSON.stringify({ 
             name: repoName.replace(/\s\(repo\)$/i, ""), 
-            branch: parameters.branch || "main" 
+            branch: params.branch || "main" 
         })
     });
     
@@ -1098,7 +1101,7 @@ if (resolvedAction === "list_commits") {
 
 // 🌿 CREATE BRANCH
 if (resolvedAction === "create_branch") {
-    const { branch_name, name } = parameters;
+    const { branch_name, name } = params;
     const workspace = await Workspace.findOne({ userId: req.userId });
     
     let workspacePath = null;
@@ -1151,6 +1154,38 @@ if (resolvedAction === "create_branch") {
         });
     }
 }
+// ------------------------------------------------------------------
+    // 🌐 GENERIC TOOL BRIDGE (For any action not handled above)
+    // ------------------------------------------------------------------
+    // This allows the AI to use all 23 tools without hardcoding every single if-statement.
+    const githubActions = Object.keys(githubCapabilities);
+    const fileActions = Object.keys(fileCapabilities);
+
+    if (githubActions.includes(resolvedAction) || fileActions.includes(resolvedAction)) {
+      console.log(`📡 Routing '${resolvedAction}' to generic backend bridge...`);
+      
+      // Determine if it's a file or github action to pick the right Port 5000 path
+      const subPath = githubActions.includes(resolvedAction) ? "actions" : "files";
+      
+      const response = await fetch(`http://localhost:5000/api/${subPath}/${resolvedAction.replace(/_/g, '-')}`, {
+        method: "POST",
+        headers: backendHeaders,
+        body: JSON.stringify(params)
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) throw new Error(result.error || `Tool ${resolvedAction} failed`);
+
+      // Generate a natural language response for the result
+      const aiText = await generateResponse({
+        mode: githubActions.includes(resolvedAction) ? "action" : "file",
+        action: resolvedAction,
+        toolResult: result
+      });
+
+      return res.json({ success: true, aiResponse: aiText, data: result });
+    }
 
     // Default Fallback
     return res.status(400).json({ success: false, error: "Action not implemented" });
@@ -1261,7 +1296,8 @@ ${content}`;
 // ------------------------------------------------------------------
 router.post("/generate-commit", async (req, res) => {
   try {
-    const repoName = req.body.name;
+    const params = { ...req.body, ...req.body.parameters };
+    const repoName = params.name || params.repository || req.body.activeRepoName;
     const workspace = await Workspace.findOne({ userId: req.userId });
     const ROOT_WORKSPACE = path.resolve(process.cwd(), "..", "mcp_workspace");
     let workspacePath = null;
@@ -1327,7 +1363,8 @@ router.post("/generate-commit", async (req, res) => {
 // ------------------------------------------------------------------
 router.post("/list-branches", async (req, res) => {
   try {
-    const repoName = req.body.name;
+    const params = { ...req.body, ...req.body.parameters };
+    const repoName = params.name || params.repository || req.body.activeRepoName;
     const workspace = await Workspace.findOne({ userId: req.userId });
     const ROOT_WORKSPACE = path.resolve(process.cwd(), "..", "mcp_workspace");
     let workspacePath = null;

@@ -8,6 +8,11 @@ import { getOctokit, githubPRService,gitExtraService } from "../services/github.
 
 const router = express.Router();
 
+router.use((req, res, next) => {
+  console.log(`📡 Backend Receiving: ${req.method} ${req.path}`);
+  next();
+});
+
 // Helper for all Git/PR actions
 const findRepoByName = async (userId, name) => {
     const workspace = await Workspace.findOne({ userId });
@@ -210,7 +215,7 @@ router.post("/repo-exists", async (req, res, next) => {
 });
 
 // GET /api/actions/list-github-repos
-router.get("/list-github-repos", async (req, res, next) => {
+router.all("/list-github-repos", async (req, res, next) => {
   try {
     const token = req.headers["x-github-token"];
     if (!token) {
@@ -597,7 +602,8 @@ router.post("/delete-branch", async (req, res) => {
 // CREATE BRANCH
 router.post("/create-branch", async (req, res, next) => {
   try {
-    const { name, branchName } = req.body;
+    const { name, branch_name } = req.body; 
+    const branchToCreate = branch_name || req.body.branchName;
     
     // 🔍 1. Find the repository document to get the absolute local path
     const repoDoc = await findRepoByName(req.userId, name);
@@ -607,7 +613,7 @@ router.post("/create-branch", async (req, res, next) => {
     // This physically moves the .git/HEAD and returns the new file list
     const result = await gitExtraService.createAndSwitchBranch(
         repoDoc.localPath, 
-        branchName
+        branchToCreate
     );
 
     // 💾 3. Update the Database immediately to stay in sync

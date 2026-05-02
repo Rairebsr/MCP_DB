@@ -98,7 +98,7 @@ export const githubCapabilities = {
     parameters: ["name", "branch_name", "checkout"]
   },
 
-
+  
   list_repos_by_language: {
     description: "Filters the user's repository list by programming language. Use for: 'show my Java projects', 'find all Python repos'.",
     parameters: ["language"]

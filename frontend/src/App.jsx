@@ -797,6 +797,7 @@ if (dialogType === "merge_pr") {
 
   try {
     let payload;
+    let plan = [];
     const lowerInput = currentInput.toLowerCase();
     
     // 🛑 2. GITHUB-STYLE COMMIT MODAL TRIGGER
@@ -816,185 +817,143 @@ if (dialogType === "merge_pr") {
       return; 
     }
 
-    // Only ask the AI Router if we haven't manually intercepted the command
-    if (!payload) {
-      setAgentTask("Routing command via Puter AI to find correct tool...");
-      // 🧠 ALWAYS USE ROUTER MODE (Allow context switching)
-      const chatHistory = messages
-        .slice(-4)
-        .map(m => ({
-          role: m.type === "user" ? "user" : "assistant",
-          content: typeof m.content === "string" ? m.content : JSON.stringify(m.content)
-        }));
-
-      const routerResponse = await askPuter(currentInput, chatHistory, "router");
-      let cleanedResponse = routerResponse.replace(/```json/g, "").replace(/```/g, "").trim();
-
-      try {
-        payload = JSON.parse(cleanedResponse);
-      } catch {
-        // fallback: router responded with text
-        setMessages(prev => [...prev, {
-          id: Date.now(),
-          type: "assistant",
-          content: routerResponse,
-          timestamp: new Date()
-        }]);
-        setIsProcessing(false);
-        return;
-      }
-    }
-
-    // 🔄 SMART CONTEXT MERGING
-    if (pendingAction && payload.action === null) {
-      payload.action = pendingAction;
-      payload.parameters = payload.parameters || {};
-      payload.parameters._continuation = currentInput;
-    }
-
-    // 🛟 SAFETY NET: If the AI router STILL failed to pick an action, fallback to keyword matching
-    if (!payload.action && !pendingAction) {
-      // (Removed the old push override here so it doesn't bypass the modal!)
-      if (lowerInput.includes("clone") || lowerInput.includes("download")) {
-        payload.action = "clone_repo";
-      } else {
-        // 🧠 CONVERSATIONAL FALLBACK: The user is asking a question!
-        const activeFile = openFiles.find(f => f.path === activeFilePath);
-        const contextString = activeFile 
-          ? `\n\n[Context: I am currently looking at ${activeFile.path}. Here is the exact code containing the conflict:]\n${activeFile.content}` 
-          : "";
-
-        try {
-          const chatResponse = await window.puter.ai.chat(currentInput + contextString);
-          setMessages(prev => [...prev, {
-            id: Date.now(),
-            type: "assistant",
-            content: chatResponse?.text || chatResponse?.message?.content || String(chatResponse),
-            timestamp: new Date()
-          }]);
-        } catch (chatErr) {
-          setMessages(prev => [...prev, {
-            id: Date.now(),
-            type: "assistant",
-            content: "I couldn't analyze the code right now. Make sure you are logged into Puter.",
-            timestamp: new Date()
-          }]);
-        }
-        setIsProcessing(false);
-        return; 
-      }
-    }
     
-    // 🎯 Auto-Inject Active Repository for Git operations
-   // 🎯 Auto-Inject Active Repository for Git & PR operations
-const gitActions = [
-  "push_repo", 
-  "clone_repo", 
-  "switch_branch", 
-  "create_branch", 
-  "list_branches", 
-  "create_pull_request", 
-  "list_pull_requests",
-  "merge_pull_request", // 👈 Added
-  "close_pull_request"  // 👈 Added
-];
+    setAgentTask("Routing command via Puter AI to find correct tool...");
+    const chatHistory = messages.slice(-4).map(m => ({
+      role: m.type === "user" ? "user" : "assistant",
+      content: typeof m.content === "string" ? m.content : JSON.stringify(m.content)
+    }));
 
-if (gitActions.includes(payload.action)) {
-  payload.parameters = payload.parameters || {};
-  if (!payload.parameters.name && activeRepository) {
-    payload.parameters.name = activeRepository;
-  }
-}
+    const contextPrefix = activeRepository 
+    ? `[Context: The user is currently working in the repository '${activeRepository}'] ` 
+    : "";
 
-    // Inside handleSubmit, add this alongside your 'push' interceptor:
-    if (lowerInput === "pull" || lowerInput === "sync" || lowerInput.startsWith("git pull")) {
-        handleManualPull(activeRepository); // 👈 Uses the Smart State context
-        setIsProcessing(false);
-        return;
-    }
+  setAgentTask("Routing command via Puter AI...");
+  const routerResponse = await askPuter(contextPrefix + currentInput, chatHistory, "router");
+    let cleanedResponse = routerResponse.replace(/```json/g, "").replace(/```/g, "").trim();
 
-    // 🚀 SEND TO ORCHESTRATOR
-    setAgentTask(`Executing ${payload.action} sequence in Orchestrator...`);
-    console.log("🚀 ORCHESTRATOR PAYLOAD:", payload); // If this doesn't show up in console, the logic exited early.
-    const backendRes = await fetch("http://localhost:4000/ask", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify(payload)
-    });
-
-    const data = await backendRes.json();
-
-    // 1. Log High-Level Activity to the new left panel
-    if (data.success) {
-      setActivityStream(prev => [{
-        id: Date.now(),
-        action: payload.action,
-        message: `Successfully executed ${payload.action.replace(/_/g, ' ')}`,
-        timestamp: new Date()
-      }, ...prev]);
-    }
-
-    // 2. Auto-Open Editor on Read or Conflict
-    if (data.editorData) {
-      openInEditor(data.editorData.path, data.editorData.content, data.editorData.hash);
-    } else if (data.error === "MERGE_CONFLICT") {
-      setActivityStream(prev => [{
-        id: Date.now(),
-        action: "conflict",
-        message: `Merge conflict in ${data.conflictedFiles?.join(', ')}`,
-        timestamp: new Date()
-      }, ...prev]);
-    }
-
-    // 3. Handle Structured Data (Repos)
-    if (data.data?.type === "github_repos") {
+    try {
+      const parsed = JSON.parse(cleanedResponse);
+      plan = Array.isArray(parsed) ? parsed : [parsed]; // 👈 Fill the plan
+    } catch {
+      // Fallback: If AI just sent text, show it and exit
       setMessages(prev => [...prev, {
-        id: Date.now(),
-        type: "github_repos",
-        content: data.data.repos,
-        timestamp: new Date(),
-        data: data.data
+        id: Date.now(), type: "assistant", content: routerResponse, timestamp: new Date()
       }]);
-      setMetrics(prev => [...prev, finishRequest(req, true)]);
       setIsProcessing(false);
       return;
     }
 
-    // 4. Handle Pending Action / Clarification
-    if (data.needsInput && data.pendingAction) {
-      setPendingAction(data.pendingAction);
+    // 🔄 SMART CONTEXT MERGING
+    // --- REPLACE EVERYTHING BELOW PARSING WITH THIS LOOP ---
+    for (const step of plan) {
+      let currentStep = { ...step };
 
-      const dangerousActions = ["delete_repo", "delete_branch", "close_pull_request", "merge_pull_request"];
-      
-      // Trigger the modal if it's a dangerous action!
-      if (data.aiResponse.includes("HUMAN-IN-THE-LOOP") || dangerousActions.includes(data.pendingAction)) {
-         setConfirmDialog({ 
-          isOpen: true, 
-        text: data.aiResponse, 
-        type: data.pendingAction, // 👈 Dynamically sets type to "close_pull_request" or "merge_pr"
-        data: data.params // Pass PR number/repo name to the modal
-        });
+      // 🔄 SMART CONTEXT MERGING (If user just said "yes")
+      if (pendingAction && currentStep.action === null) {
+        currentStep.action = pendingAction;
+        currentStep.parameters = currentStep.parameters || {};
+        currentStep.parameters._continuation = currentInput;
       }
 
+      // 🎯 Auto-Inject Active Repository for Git/PR actions
+      const gitActions = [
+        "push_repo", "clone_repo", "switch_branch", "create_branch", 
+        "list_branches", "create_pull_request", "list_pull_requests",
+        "merge_pull_request", "close_pull_request", "list_commits", 
+        "repo_exists", "get_repo_details" // 👈 Added missing ones
+      ];
+
+      if (gitActions.includes(currentStep.action)) {
+        // Ensure the parameters object exists
+        currentStep.parameters = currentStep.parameters || {};
+        
+        if (!currentStep.parameters.name && activeRepository) {
+          console.log(`🧠 Context Injection: Adding ${activeRepository} to ${currentStep.action}`);
+          currentStep.parameters.name = activeRepository;
+        }
+      }
+
+      setAgentTask(`Executing ${currentStep.action} in Orchestrator...`);
+
+      const backendRes = await fetch("http://localhost:4000/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(currentStep)
+      });
+
+      // 🛡️ SAFETY CHECK: Ensure we actually got JSON
+      const contentType = backendRes.headers.get("content-type");
+      let data;
+      if (contentType && contentType.includes("application/json")) {
+        data = await backendRes.json();
+      } else {
+        const textError = await backendRes.text();
+        console.error("Non-JSON Response received:", textError);
+        data = { success: false, error: "Server returned a non-JSON error (Check Orchestrator logs)." };
+      }
+
+      // 1. Log to Activity Stream
+      if (data.success) {
+        setActivityStream(prev => [{
+          id: Date.now(),
+          action: currentStep.action,
+          message: `Successfully executed ${currentStep.action.replace(/_/g, ' ')}`,
+          timestamp: new Date()
+        }, ...prev]);
+      }
+
+      // 🟢 Keep this to handle the "PR List" or "Repo List" visual cards
+      if (data.data?.type === "github_repos" || data.data?.type === "pull_requests") {
+        setMessages(prev => [...prev, {
+          id: Date.now(),
+          type: data.data.type,
+          content: data.data.repos || data.data.prs,
+          timestamp: new Date(),
+          data: data.data
+        }]);
+      }
+
+      // 2. Handle Editor/Conflicts
+      if (data.editorData) {
+        openInEditor(data.editorData.path, data.editorData.content, data.editorData.hash);
+      }
+
+      // 3. Handle Pending Action (Human-in-the-loop)
+      if (data.needsInput && data.pendingAction) {
+        setPendingAction(data.pendingAction);
+        const dangerous = ["delete_repo", "delete_branch", "close_pull_request", "merge_pull_request"];
+        
+        if (data.aiResponse.includes("HUMAN-IN-THE-LOOP") || dangerous.includes(data.pendingAction)) {
+           setConfirmDialog({ 
+             isOpen: true, 
+             text: data.aiResponse, 
+             type: data.pendingAction, 
+             data: data.params,
+             requiresInput: data.pendingAction === "close_pull_request"
+           });
+        }
+        
+        setMessages(prev => [...prev, {
+          id: Date.now(), type: "assistant", content: data.aiResponse, timestamp: new Date()
+        }]);
+        // Stop the loop here because we need human input!
+        break; 
+      }
+
+      // 4. Update Chat with Result
       setMessages(prev => [...prev, {
         id: Date.now(),
-        type: "assistant",
-        content: data.aiResponse,
+        type: data.success ? "assistant" : "error",
+        content: data.aiResponse || data.error || `Completed ${currentStep.action}`,
+        data: data.data,
         timestamp: new Date()
       }]);
-      return;
-    }
 
-    // 5. Normal Action Complete
-    setPendingAction(null);
-    setMessages(prev => [...prev, {
-      id: Date.now(),
-      type: data.success ? "assistant" : "error",
-      content: data.aiResponse || data.error || "Action finished invisibly.",
-      data: data.data,
-      timestamp: new Date()
-    }]);
+      // If a step fails, stop the entire plan
+      if (!data.success) break;
+    }
 
     setMetrics(prev => [...prev, finishRequest(req, true)]);
 

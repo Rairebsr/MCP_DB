@@ -1,0 +1,1 @@
+function login(username, password) {\n  // Basic login placeholder\n  if (!username || !password) {\n    throw new Error("Missing credentials");\n  }\n  // In a real app, authenticate with a server\n  return { \"success\": true, \"user\": username };\n}
